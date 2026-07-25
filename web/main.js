@@ -105,6 +105,30 @@ function isHumanTurn(view) {
   return gameMode.opponent !== "computer" || view.turn === gameMode.humanColor;
 }
 
+// Analysis has no opponent concept at all — both sides are always the
+// player's to move, unlike Play where isHumanTurn gates input during the
+// engine's turn.
+function isHumanTurnFor(page, view) {
+  return page === "analysis" ? true : isHumanTurn(view);
+}
+
+// Maps a shared action ("make_move", "legal_moves", ...) to the backend
+// command that actually implements it for the given page — Play's commands
+// keep their original unprefixed names (existing callers/tests depend on
+// that), Analysis's are the analysis_-prefixed ones added alongside its own
+// independent Game state (see src-tauri/src/commands.rs).
+function cmdName(page, base) {
+  return page === "analysis" ? `analysis_${base}` : base;
+}
+
+function viewFor(page) {
+  return page === "analysis" ? analysisView : currentView;
+}
+
+function flippedFor(page) {
+  return page === "analysis" ? analysisFlipped : isBoardFlipped();
+}
+
 let selectedSquare = null;
 let legalTargets = [];
 let pgnExpanded = false;
@@ -310,33 +334,42 @@ function playGameOverSound() {
 // Tracks the status seen on the previous render() so check/game-over sounds
 // fire exactly once per transition, including ones that arrive through
 // clock polling (a flag falling) rather than a move the player just made.
+// Kept separate per page — Play and Analysis are independent games whose
+// statuses shouldn't cross-suppress or cross-trigger each other's sounds.
 let previousStatus = null;
+let analysisPreviousStatus = null;
 
-function playSoundForTransition(view, moveContext) {
+function playSoundForTransition(page, view, moveContext) {
+  const previous = page === "analysis" ? analysisPreviousStatus : previousStatus;
   if (GAME_OVER_STATUSES.has(view.status)) {
-    if (previousStatus !== view.status) playGameOverSound();
+    if (previous !== view.status) playGameOverSound();
   } else if (view.status === "check") {
-    if (previousStatus !== "check") playCheckSound();
+    if (previous !== "check") playCheckSound();
   } else if (moveContext === "capture") {
     playCaptureSound();
   } else if (moveContext === "move") {
     playMoveSound();
   }
-  previousStatus = view.status;
+  if (page === "analysis") analysisPreviousStatus = view.status;
+  else previousStatus = view.status;
 }
 
 // ---------- Sidebar / pages ----------
 //
-// Every page currently renders identically to the main game view (see
-// renderPageContent's switch below) — the point of routing through a page
-// id at all, rather than just having the one view, is so a page can later
-// diverge (e.g. an Analysis page that swaps the play controls for engine
-// lines) by adding a branch here instead of restructuring the app.
+// Three pages: "home" is a placeholder landing tab (nothing on it yet
+// beyond the sidebar/banner chrome that's already global to every page) and
+// is where the app opens by default, "play" is the original board — a real
+// game against another human or the engine, with a clock and an opponent to
+// resign against — and "analysis" is a free sandbox board (its own
+// independent Game on the backend, see AnalysisGame in
+// src-tauri/src/commands.rs) with no clock, no opponent, and the eval bar
+// always on.
 const PAGES = [
+  { id: "home", label: "Home" },
   { id: "play", label: "Play" },
   { id: "analysis", label: "Analysis" },
 ];
-let activePage = "play";
+let activePage = "home";
 
 function renderSidebar() {
   const nav = document.getElementById("sidebar");
@@ -357,17 +390,37 @@ function updatePageHeading() {
   document.getElementById("page-heading-subtitle").textContent = page.label;
 }
 
+// Shows/hides the board area entirely (Home has none of it) and picks
+// which page's action buttons and Import button are visible — separate
+// from paint() itself since it only needs to run when the active page
+// actually changes, not on every re-render of whichever page is showing.
+function updatePageVisibility() {
+  const showBoard = activePage === "play" || activePage === "analysis";
+  document.getElementById("game-layout").classList.toggle("hidden", !showBoard);
+  document.getElementById("fen-box").classList.toggle("hidden", !showBoard);
+  document.getElementById("play-buttons").classList.toggle("hidden", activePage !== "play");
+  document.getElementById("analysis-buttons").classList.toggle("hidden", activePage !== "analysis");
+  document.getElementById("import-pgn").classList.toggle("hidden", activePage !== "analysis");
+}
+
 function setActivePage(pageId) {
   if (pageId === activePage) return;
   activePage = pageId;
   renderSidebar();
   updatePageHeading();
-  switch (activePage) {
-    case "play":
-    case "analysis":
-    default:
-      if (currentView) render(currentView);
-      break;
+  updatePageVisibility();
+  if (pageId === "play") {
+    // Re-fetched rather than repainted from a possibly-stale cached
+    // currentView — Play's clock keeps running server-side the whole time
+    // this tab isn't visible (clock polling only runs while it's the
+    // active page, see startClockPollingIfNeeded), so the cached view can
+    // be seconds or minutes out of date by the time the player switches
+    // back to it.
+    invoke("get_state").then((view) => paint("play", view));
+  } else if (pageId === "analysis" && analysisView) {
+    // Nothing outside this tab can change the Analysis position, so the
+    // cached view is never stale — no need to re-fetch.
+    paint("analysis", analysisView);
   }
 }
 
@@ -416,10 +469,11 @@ function askPromotionChoice(color) {
   });
 }
 
-function statusText(view) {
+function statusText(page, view) {
   const turn = view.turn === "white" ? "White" : "Black";
   const other = view.turn === "white" ? "Black" : "White";
   if (
+    page === "play" &&
     gameMode.opponent === "computer" &&
     !view.awaitingClockChoice &&
     !isHumanTurn(view) &&
@@ -533,19 +587,22 @@ let lastAnalysis = null;
 
 // Only treat lastAnalysis as showable if it's actually for the position on
 // screen right now — once the position moves on, a stale result for the
-// old one must fall back to the cheap material score, not linger.
-function currentAnalysis(view) {
-  return lastAnalysis && lastAnalysis.fen === view.fen ? lastAnalysis : null;
+// old one must fall back to the cheap material score, not linger. Keyed by
+// page too, not just fen: Play and Analysis are independent games that can
+// easily land on the same fen (e.g. both at the starting position), and a
+// result computed for one must never paint the other's bar.
+function currentAnalysis(page, view) {
+  return lastAnalysis && lastAnalysis.page === page && lastAnalysis.fen === view.fen ? lastAnalysis : null;
 }
 
-function whitePercentFor(view) {
+function whitePercentFor(page, view) {
   if (view.status === "checkmate") {
     // The side to move has no moves and just got mated — this, and a
     // forced mate the search itself found (below), are the only cases
     // that empty the bar completely.
     return view.turn === "white" ? 0 : 100;
   }
-  const analysis = currentAnalysis(view);
+  const analysis = currentAnalysis(page, view);
   if (analysis && analysis.kind === "mateIn") {
     return analysis.value > 0 ? 100 : 0;
   }
@@ -554,8 +611,8 @@ function whitePercentFor(view) {
   return 50 + t * (50 - EVAL_BAR_FLOOR_PERCENT);
 }
 
-function evalBarText(view) {
-  const analysis = currentAnalysis(view);
+function evalBarText(page, view) {
+  const analysis = currentAnalysis(page, view);
   if (analysis && analysis.kind === "mateIn") {
     return `M${analysis.value}`;
   }
@@ -564,12 +621,12 @@ function evalBarText(view) {
   return score >= 0 ? `+${pawns}` : pawns;
 }
 
-function paintEvalBar(view) {
-  const whitePercent = whitePercentFor(view);
+function paintEvalBar(page, view) {
+  const whitePercent = whitePercentFor(page, view);
   document.getElementById("eval-bar-white").style.height = `${whitePercent}%`;
   document.getElementById("eval-bar-black").style.height = `${100 - whitePercent}%`;
-  document.getElementById("eval-bar-text").textContent = evalBarText(view);
-  const analysis = currentAnalysis(view);
+  document.getElementById("eval-bar-text").textContent = evalBarText(page, view);
+  const analysis = currentAnalysis(page, view);
   document.getElementById("eval-bar").classList.toggle(
     "mate-found",
     view.status === "checkmate" || (analysis && analysis.kind === "mateIn")
@@ -586,10 +643,10 @@ let requestedAnalysisKey = null;
 // does, so it's a separate command the frontend calls only when the
 // position (or the requested depth) actually changes — not on every
 // render, and not folded into the constantly-polled game state.
-async function updateAnalysis(view, depth) {
+async function updateAnalysis(page, view, depth) {
   let result;
   try {
-    result = await invoke("analyze", { depth });
+    result = await invoke(cmdName(page, "analyze"), { depth });
   } catch (err) {
     console.error("analyze failed:", err);
     return; // leave the bar showing whatever it had before
@@ -602,14 +659,16 @@ async function updateAnalysis(view, depth) {
   // identity check here was discarding a perfectly valid result — and thus
   // the eval bar just not updating — any time a search outlived one tick,
   // which happens routinely once a clock is running.
-  if (currentView.fen !== view.fen) return;
-  lastAnalysis = { fen: view.fen, depth, ...result };
-  paintEvalBar(currentView);
+  if (viewFor(page).fen !== view.fen) return;
+  lastAnalysis = { page, fen: view.fen, depth, ...result };
+  if (page === activePage) paintEvalBar(page, viewFor(page));
 }
 
-function renderEvalBar(view) {
+function renderEvalBar(page, view) {
   const column = document.getElementById("eval-bar-column");
-  const showEvalBar = document.getElementById("eval-bar-checkbox").checked;
+  // Forced on for Analysis — there's no toggle to check there, the bar is
+  // simply always part of that tab.
+  const showEvalBar = page === "analysis" ? true : document.getElementById("eval-bar-checkbox").checked;
   column.classList.toggle("hidden", !showEvalBar);
   if (!showEvalBar) return;
 
@@ -619,9 +678,9 @@ function renderEvalBar(view) {
   // hasn't already been requested, so plain re-renders of an unchanged
   // position (selecting a piece, switching sidebar pages, ...) never
   // start a redundant search.
-  paintEvalBar(view);
+  paintEvalBar(page, view);
   const depth = Number(document.getElementById("eval-bar-depth").value);
-  const key = `${view.fen}|${depth}`;
+  const key = `${page}|${view.fen}|${depth}`;
   if (key === requestedAnalysisKey) return;
   requestedAnalysisKey = key;
   // Deferred to the next event-loop tick rather than called inline here —
@@ -629,7 +688,7 @@ function renderEvalBar(view) {
   // on its own, never bundled into the same synchronous burst as kicking
   // off an analyze() request. The eval bar is allowed to visibly catch up
   // a beat later; the piece appearing where it was dropped is not.
-  setTimeout(() => updateAnalysis(view, depth), 0);
+  setTimeout(() => updateAnalysis(page, view, depth), 0);
 }
 
 function stopClockPolling() {
@@ -658,9 +717,12 @@ function startClockPollingIfNeeded(view) {
     // Otherwise only the clock numbers moved. Rebuilding the whole board
     // (and re-binding all 64 click listeners) four times a second made
     // clicks feel dropped/laggy, so a normal tick only touches the clock
-    // display instead of calling the full render().
+    // display instead of calling the full render() — and only if Play is
+    // actually the page on screen right now; the clock DOM is shared with
+    // Analysis (see paint()), so painting Play's numbers into it while the
+    // player is looking at Analysis would show the wrong tab's clock.
     currentView = latest;
-    renderClocks(latest);
+    if (activePage === "play") renderClocks(latest);
   }, CLOCK_POLL_INTERVAL_MS);
 }
 
@@ -719,11 +781,11 @@ async function chooseTimeControl(initialMs, incrementMs) {
 // done) — previously built once at startup, back when the board only ever
 // had one orientation. Clears its own previous output first since it can
 // now be called repeatedly.
-function renderLabels() {
+function renderLabels(page) {
   const wrapper = document.querySelector(".board-wrapper");
   wrapper.querySelectorAll(".rank-label, .file-label, .board-corner").forEach((el) => el.remove());
 
-  const flipped = isBoardFlipped();
+  const flipped = flippedFor(page);
   const ranks = flipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
   const files = flipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
 
@@ -793,19 +855,41 @@ function renderFen(view) {
 }
 
 let currentView = null;
+// The Analysis tab's own view — kept entirely separate from currentView
+// (Play's), since the two boards are independent games on the backend (see
+// AnalysisGame in src-tauri/src/commands.rs) and switching tabs must never
+// mix their data.
+let analysisView = null;
+// Purely a display setting, not tied to any "human color" the way Play's
+// flip is — Analysis has no side selection, just a manual toggle button.
+let analysisFlipped = false;
 
 // moveContext is "move"/"capture" when this render follows a move the
 // player just made, or omitted for renders that don't represent a new move
 // (selecting a piece, switching sidebar pages, a clock tick, ...) — it's
 // only used to pick a sound, not to decide what to draw.
-function render(view, moveContext) {
-  currentView = view;
+//
+// render() (Play) and paintAnalysis() (Analysis) are both thin wrappers
+// around this one shared core — the two tabs share a single physical
+// board/PGN-panel/FEN-box/eval-bar in the DOM (only one is ever visible at
+// a time) rather than duplicating that markup and all of this logic, so
+// paint() takes an explicit page and caches the view for whichever one it
+// is even when that page isn't the one currently on screen — a Play move
+// arriving while the Analysis tab is showing (or vice versa — nothing
+// else can touch Analysis, but the Play clock keeps ticking regardless of
+// which tab is visible) must update the right cached view without
+// clobbering the DOM the player is actually looking at.
+function paint(page, view, moveContext) {
+  if (page === "play") currentView = view;
+  else analysisView = view;
+  if (page !== activePage) return;
+
   // lastAnalysis is intentionally NOT cleared here — currentAnalysis(view)
   // (above) already treats it as stale once view.fen no longer matches, and
   // actually clearing it on every render (including a plain selection
   // click that doesn't change the position) used to wipe out a perfectly
   // valid analysis and flash the bar back to the material-only score.
-  renderLabels();
+  renderLabels(page);
   const board = document.getElementById("board");
   board.innerHTML = "";
 
@@ -816,7 +900,7 @@ function render(view, moveContext) {
   // reversed from the "normal" a1-bottom-left orientation when the board
   // is flipped — since squares are simply appended in DOM order and placed
   // by the CSS grid's auto-flow, not given explicit row/column positions.
-  const flipped = isBoardFlipped();
+  const flipped = flippedFor(page);
   const ranks = flipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
   const files = flipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
 
@@ -832,7 +916,7 @@ function render(view, moveContext) {
       if (squareName === kingInCheckSquare) classes.push("king-in-check");
       square.className = classes.join(" ");
       square.dataset.square = squareName;
-      square.addEventListener("mousedown", (event) => handlePointerDown(event, squareName, view));
+      square.addEventListener("mousedown", (event) => handlePointerDown(page, event, squareName, view));
 
       const piece = pieceAt(view.board, squareName);
       const isDragSource = dragState !== null && squareName === dragState.fromSquare;
@@ -867,38 +951,55 @@ function render(view, moveContext) {
     }
   }
 
-  document.getElementById("status").textContent = statusText(view);
+  document.getElementById("status").textContent = statusText(page, view);
   renderPgn(view);
   renderFen(view);
-  renderClocks(view);
-  renderEvalBar(view);
-  playSoundForTransition(view, moveContext);
-
-  renderSetupPickers();
-  // Game::resign() resigns whichever side's turn it currently is — there's
-  // no explicit "which color is resigning" — so letting the human click
-  // Resign during the computer's turn would misattribute the resignation
-  // to the computer's side. Simplest correct fix: only allow it on the
-  // human's own turn, same as board input is already frozen the rest of
-  // the time it's not their move.
-  document.getElementById("resign").disabled =
-    gameMode.opponent === "computer" &&
-    !view.awaitingClockChoice &&
-    !isHumanTurn(view) &&
-    !GAME_OVER_STATUSES.has(view.status);
-  document.getElementById("clock-picker-overlay").classList.toggle("hidden", !view.awaitingClockChoice);
-  if (GAME_OVER_STATUSES.has(view.status)) {
-    showGameOverModal(view);
+  if (page === "play") {
+    renderClocks(view);
   } else {
-    hideGameOverModal();
+    // Analysis never has a clock — keep the shared clock DOM out of the
+    // way rather than leaving Play's last-painted numbers on screen.
+    document.getElementById("black-clock").classList.add("clock-hidden");
+    document.getElementById("white-clock").classList.add("clock-hidden");
   }
-  startClockPollingIfNeeded(view);
-  maybeTriggerAiMove(view);
+  renderEvalBar(page, view);
+  playSoundForTransition(page, view, moveContext);
+
+  if (page === "play") {
+    renderSetupPickers();
+    // Game::resign() resigns whichever side's turn it currently is —
+    // there's no explicit "which color is resigning" — so letting the
+    // human click Resign during the computer's turn would misattribute
+    // the resignation to the computer's side. Simplest correct fix: only
+    // allow it on the human's own turn, same as board input is already
+    // frozen the rest of the time it's not their move.
+    document.getElementById("resign").disabled =
+      gameMode.opponent === "computer" &&
+      !view.awaitingClockChoice &&
+      !isHumanTurn(view) &&
+      !GAME_OVER_STATUSES.has(view.status);
+    document.getElementById("clock-picker-overlay").classList.toggle("hidden", !view.awaitingClockChoice);
+    if (GAME_OVER_STATUSES.has(view.status)) {
+      showGameOverModal(view);
+    } else {
+      hideGameOverModal();
+    }
+    startClockPollingIfNeeded(view);
+    maybeTriggerAiMove(view);
+  }
+}
+
+function render(view, moveContext) {
+  paint("play", view, moveContext);
+}
+
+function paintAnalysis(view, moveContext) {
+  paint("analysis", view, moveContext);
 }
 
 // Shared by both interaction paths: clicking a second, already-highlighted
 // square, and dropping a dragged piece onto one.
-async function performMove(fromSquare, toSquare, view) {
+async function performMove(page, fromSquare, toSquare, view) {
   let promotion = null;
   if (isPromotionMove(view, fromSquare, toSquare)) {
     promotion = await askPromotionChoice(view.turn);
@@ -907,17 +1008,17 @@ async function performMove(fromSquare, toSquare, view) {
   const wasCapture = !!pieceAt(view.board, toSquare);
 
   try {
-    const nextView = await invoke("make_move", { from: fromSquare, to: toSquare, promotion });
+    const nextView = await invoke(cmdName(page, "make_move"), { from: fromSquare, to: toSquare, promotion });
     selectedSquare = null;
     legalTargets = [];
     lastMove = { from: fromSquare, to: toSquare };
     lastMoveAnimated = false;
-    render(nextView, wasCapture ? "capture" : "move");
+    paint(page, nextView, wasCapture ? "capture" : "move");
   } catch (err) {
     console.error("make_move failed:", err);
     selectedSquare = null;
     legalTargets = [];
-    render(view);
+    paint(page, view);
   }
 }
 
@@ -1013,36 +1114,36 @@ let selectionRequestId = 0;
 // appear the instant the pointer goes down, not once this IPC round-trip
 // resolves, or dragging would inherit exactly the "beat" of latency this
 // was built to get away from.
-async function selectSquare(squareName, view) {
+async function selectSquare(page, squareName, view) {
   selectedSquare = squareName;
   const requestId = ++selectionRequestId;
-  const targets = await invoke("legal_moves", { square: squareName });
+  const targets = await invoke(cmdName(page, "legal_moves"), { square: squareName });
   if (requestId !== selectionRequestId) return; // superseded by a later selection
   legalTargets = targets;
-  render(view);
+  paint(page, view);
 }
 
-function handlePointerDown(event, squareName, view) {
+function handlePointerDown(page, event, squareName, view) {
   if (event.button !== 0) return; // left button only
-  if (!isHumanTurn(view)) return; // the engine's own pieces aren't the player's to move
+  if (!isHumanTurnFor(page, view)) return; // the engine's own pieces aren't the player's to move
 
   if (selectedSquare && legalTargets.includes(squareName)) {
-    performMove(selectedSquare, squareName, view);
+    performMove(page, selectedSquare, squareName, view);
     return;
   }
 
   const piece = pieceAt(view.board, squareName);
   if (piece && piece.color === view.turn) {
-    selectSquare(squareName, view); // not awaited — see its own comment
+    selectSquare(page, squareName, view); // not awaited — see its own comment
     if (settings.interactionMode === "drag") {
-      beginDrag(event, squareName);
+      beginDrag(page, event, squareName);
     }
     return;
   }
 
   selectedSquare = null;
   legalTargets = [];
-  render(view);
+  paint(page, view);
 }
 
 // ---------- Drag and drop ----------
@@ -1051,7 +1152,7 @@ function handlePointerDown(event, squareName, view) {
 // above) rather than replacing it — picking a piece up starts a drag *and*
 // selects it, so a plain click (mousedown+mouseup with no real movement)
 // still works exactly as a click always did.
-function beginDrag(event, fromSquare) {
+function beginDrag(page, event, fromSquare) {
   const img = event.currentTarget.querySelector(".piece-sprite");
   if (!img) return;
 
@@ -1063,6 +1164,7 @@ function beginDrag(event, fromSquare) {
   document.body.appendChild(ghost);
 
   dragState = {
+    page,
     fromSquare,
     ghost,
     startX: event.clientX,
@@ -1124,7 +1226,7 @@ function applyDragFrame() {
 }
 
 async function handleDragEnd(event) {
-  const { fromSquare, ghost, hoveredSquare, rafHandle } = dragState;
+  const { page, fromSquare, ghost, hoveredSquare, rafHandle } = dragState;
 
   document.removeEventListener("mousemove", handleDragMove);
   document.removeEventListener("mouseup", handleDragEnd);
@@ -1137,13 +1239,13 @@ async function handleDragEnd(event) {
     hoveredSquare && hoveredSquare !== fromSquare && legalTargets.includes(hoveredSquare);
 
   if (droppedOnLegalTarget) {
-    await performMove(fromSquare, hoveredSquare, currentView);
+    await performMove(page, fromSquare, hoveredSquare, viewFor(page));
   } else {
     // Dropped somewhere illegal (or back on its own square) — nothing
     // moved, but render() was skipping the piece at fromSquare for as
     // long as dragState was set, so it needs one more render to bring it
     // back now that dragState is null again.
-    render(currentView);
+    paint(page, viewFor(page));
   }
 }
 
@@ -1173,43 +1275,68 @@ async function copyToClipboard(text) {
   }
 }
 
+// The FEN box is shared between the Play and Analysis tabs (see paint()),
+// so "Load" has to target whichever one is actually on screen — loading
+// into Play while the player is looking at Analysis (or vice versa) would
+// silently edit a game they can't even see.
 async function loadFen() {
+  const page = activePage;
   const fen = document.getElementById("fen-text").value.trim();
   try {
-    const view = await invoke("load_fen", { fen });
+    const view = await invoke(cmdName(page, "load_fen"), { fen });
     selectedSquare = null;
     legalTargets = [];
     pgnExpanded = false;
     lastMove = null;
     lastMoveAnimated = false;
-    aiMoveRequestedForFen = null;
-    render(view);
+    if (page === "play") aiMoveRequestedForFen = null;
+    paint(page, view);
   } catch (err) {
     alert(`Couldn't load that FEN:\n${err}`);
   }
 }
 
+// Only reachable from the Analysis tab (see updatePageVisibility — the
+// Import button is hidden everywhere else), so this always targets the
+// Analysis board.
 async function importPgn() {
   const pgn = window.prompt("Paste PGN to import:");
   if (!pgn) return; // cancelled or empty
 
   try {
-    const view = await invoke("load_pgn", { pgn });
+    const view = await invoke("analysis_load_pgn", { pgn });
     selectedSquare = null;
     legalTargets = [];
     pgnExpanded = false;
     lastMove = null;
     lastMoveAnimated = false;
-    aiMoveRequestedForFen = null;
-    render(view);
+    paintAnalysis(view);
   } catch (err) {
     alert(`Couldn't import that PGN:\n${err}`);
   }
 }
 
+async function resetAnalysisPosition() {
+  selectedSquare = null;
+  legalTargets = [];
+  pgnExpanded = false;
+  lastMove = null;
+  lastMoveAnimated = false;
+  paintAnalysis(await invoke("analysis_reset"));
+}
+
+// Purely a local display toggle — no backend call, nothing about the
+// position itself changes, so this just repaints with the same view under
+// the opposite orientation.
+function toggleAnalysisFlip() {
+  analysisFlipped = !analysisFlipped;
+  if (analysisView) paintAnalysis(analysisView);
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   renderSidebar();
   updatePageHeading();
+  updatePageVisibility();
   renderClockPicker();
   document.getElementById("new-game").addEventListener("click", startNewGame);
   document.getElementById("resign").addEventListener("click", resign);
@@ -1220,22 +1347,32 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("game-over-copy-pgn").addEventListener("click", () => {
     copyToClipboard(document.getElementById("game-over-pgn").value);
   });
-  document.getElementById("eval-bar-checkbox").addEventListener("change", () => renderEvalBar(currentView));
-  document.getElementById("eval-bar-depth").addEventListener("change", () => renderEvalBar(currentView));
+  document.getElementById("analysis-reset").addEventListener("click", resetAnalysisPosition);
+  document.getElementById("analysis-flip").addEventListener("click", toggleAnalysisFlip);
+  // The eval bar is shared between both tabs (see paint()/renderEvalBar) —
+  // these controls always affect whichever page is actually showing it.
+  document.getElementById("eval-bar-checkbox").addEventListener("change", () =>
+    renderEvalBar(activePage, viewFor(activePage))
+  );
+  document.getElementById("eval-bar-depth").addEventListener("change", () =>
+    renderEvalBar(activePage, viewFor(activePage))
+  );
 
   // Clicking the toggle expands to full history; clicking anywhere else in
   // the panel while expanded collapses it back to the last
   // PGN_COLLAPSED_ROWS rows. stopPropagation on the toggle keeps that same
-  // click from also bubbling up and immediately re-collapsing it.
+  // click from also bubbling up and immediately re-collapsing it. Reads
+  // viewFor(activePage), not currentView — the PGN panel is shared between
+  // Play and Analysis, same as the eval bar above.
   document.getElementById("pgn-toggle").addEventListener("click", (event) => {
     event.stopPropagation();
     pgnExpanded = true;
-    renderPgn(currentView);
+    renderPgn(viewFor(activePage));
   });
   document.getElementById("pgn-panel").addEventListener("click", () => {
     if (pgnExpanded) {
       pgnExpanded = false;
-      renderPgn(currentView);
+      renderPgn(viewFor(activePage));
     }
   });
 
@@ -1248,7 +1385,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // they need the same stopPropagation treatment as pgn-toggle above.
   document.getElementById("copy-pgn").addEventListener("click", (event) => {
     event.stopPropagation();
-    copyToClipboard(currentView.pgn);
+    copyToClipboard(viewFor(activePage).pgn);
   });
   document.getElementById("import-pgn").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1302,5 +1439,11 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   renderSetupPickers();
 
-  invoke("get_state").then(render);
+  // Both boards' initial state are fetched up front regardless of which
+  // page is active at launch (Analysis, by default) — paint() itself
+  // already skips touching the DOM for whichever page isn't currently
+  // showing (see its early return), so this just primes both caches ahead
+  // of whenever the player switches tabs.
+  invoke("get_state").then((view) => paint("play", view));
+  invoke("analysis_get_state").then((view) => paint("analysis", view));
 });

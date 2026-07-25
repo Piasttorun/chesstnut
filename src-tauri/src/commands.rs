@@ -419,3 +419,141 @@ pub fn load_pgn(
     bump_generation(&generation);
     Ok(view(&game))
 }
+
+// ---------- Analysis tab ----------
+//
+// A second, independent `Game` — moving pieces around on the Analysis
+// board must never touch whatever's in progress on the Play tab, and vice
+// versa. Tauri's managed state is keyed by concrete type, so reusing
+// `Mutex<Game>`/`Arc<AtomicU64>` here would collide with Play's own
+// instances of those same types — these newtype wrappers give the
+// Analysis state its own type identity instead. No clock, no opponent,
+// no resignation: it's a free two-sided sandbox board that starts at the
+// standard position and is only ever reset by the player, not by a
+// pre-game setup flow.
+pub struct AnalysisGame(pub Mutex<Game>);
+pub struct AnalysisGeneration(pub Arc<AtomicU64>);
+
+#[tauri::command]
+pub fn analysis_get_state(state: State<AnalysisGame>) -> GameView {
+    let game = state.0.lock().unwrap();
+    view(&game)
+}
+
+#[tauri::command]
+pub fn analysis_legal_moves(state: State<AnalysisGame>, square: String) -> Result<Vec<String>, String> {
+    let game = state.0.lock().unwrap();
+    let from = parse_square(&square)?;
+
+    if game.is_game_over() {
+        return Ok(Vec::new());
+    }
+
+    let piece = match game.board().get(from) {
+        Some(piece) => piece,
+        None => return Ok(Vec::new()),
+    };
+    if piece.color != game.turn() {
+        return Ok(Vec::new());
+    }
+
+    Ok(game
+        .legal_moves_from(from)
+        .into_iter()
+        .map(|mv| square_str(mv.to))
+        .collect())
+}
+
+#[tauri::command]
+pub fn analysis_make_move(
+    state: State<AnalysisGame>,
+    generation: State<AnalysisGeneration>,
+    from: String,
+    to: String,
+    promotion: Option<String>,
+) -> Result<GameView, String> {
+    let mut game = state.0.lock().unwrap();
+    let from_square = parse_square(&from)?;
+    let to_square = parse_square(&to)?;
+    let promotion_kind = match promotion {
+        Some(text) => Some(parse_promotion(&text)?),
+        None => None,
+    };
+
+    let mut candidates = game
+        .legal_moves_from(from_square)
+        .into_iter()
+        .filter(|mv| mv.to == to_square);
+
+    let mv = match promotion_kind {
+        Some(kind) => candidates
+            .find(|mv| mv.promotion == Some(kind))
+            .ok_or_else(|| "illegal move".to_string())?,
+        None => candidates.next().ok_or_else(|| "illegal move".to_string())?,
+    };
+
+    game.make_move(mv).map_err(|_| "illegal move".to_string())?;
+    bump_generation(&generation.0);
+    Ok(view(&game))
+}
+
+/// The Analysis tab's "Reset Position" button — straight back to the
+/// standard starting position, immediately playable (unlike `new_game`,
+/// there's no time-control picker to go through first; Analysis never has
+/// a clock at all).
+#[tauri::command]
+pub fn analysis_reset(state: State<AnalysisGame>, generation: State<AnalysisGeneration>) -> GameView {
+    let mut game = state.0.lock().unwrap();
+    *game = Game::new();
+    bump_generation(&generation.0);
+    view(&game)
+}
+
+#[tauri::command]
+pub fn analysis_load_fen(
+    state: State<AnalysisGame>,
+    generation: State<AnalysisGeneration>,
+    fen: String,
+) -> Result<GameView, String> {
+    let mut game = state.0.lock().unwrap();
+    *game = Game::from_fen(&fen)?;
+    bump_generation(&generation.0);
+    Ok(view(&game))
+}
+
+#[tauri::command]
+pub fn analysis_load_pgn(
+    state: State<AnalysisGame>,
+    generation: State<AnalysisGeneration>,
+    pgn: String,
+) -> Result<GameView, String> {
+    let mut game = state.0.lock().unwrap();
+    *game = Game::import_pgn(&pgn)?;
+    bump_generation(&generation.0);
+    Ok(view(&game))
+}
+
+/// Same shape as `analyze`, scoped to the Analysis board — see that
+/// command's own comment for why this clones off the mutex, runs on the
+/// blocking pool, and checks `generation` before trusting its result.
+#[tauri::command]
+pub async fn analysis_analyze(
+    state: State<'_, AnalysisGame>,
+    generation: State<'_, AnalysisGeneration>,
+    depth: u32,
+) -> Result<ScoreDto, String> {
+    let game = state.0.lock().unwrap().clone();
+    let expected_generation = generation.0.load(Ordering::Relaxed);
+    let cancel = chesstnut::ai::Cancellation::tracking(generation.inner().0.clone(), expected_generation);
+    let score = tauri::async_runtime::spawn_blocking(move || {
+        chesstnut::ai::search_cancellable(&game, depth, &cancel)
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+
+    if generation.0.load(Ordering::Relaxed) != expected_generation {
+        return Err("the position changed before analysis finished".to_string());
+    }
+
+    Ok(score.into())
+}
