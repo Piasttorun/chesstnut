@@ -26,9 +26,11 @@
 
 mod eval;
 mod random;
+mod search;
 
 pub use eval::evaluate;
 pub use random::RandomEngine;
+pub use search::search;
 
 use crate::engine::game::Game;
 use crate::engine::moves::Move;

@@ -36,6 +36,27 @@ pub struct GameView {
     score: i32,
 }
 
+/// A search result from the `analyze` command — deliberately not part of
+/// `GameView`/`view()`, since a depth-N search is far more expensive than
+/// everything else in that struct and `get_state` gets polled every 250ms
+/// for the clock. The frontend calls `analyze` separately, only when the
+/// position actually changes.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum ScoreDto {
+    Centipawns(i32),
+    MateIn(i32),
+}
+
+impl From<chesstnut::ai::Score> for ScoreDto {
+    fn from(score: chesstnut::ai::Score) -> Self {
+        match score {
+            chesstnut::ai::Score::Centipawns(cp) => ScoreDto::Centipawns(cp),
+            chesstnut::ai::Score::MateIn(n) => ScoreDto::MateIn(n),
+        }
+    }
+}
+
 fn kind_str(kind: PieceKind) -> &'static str {
     match kind {
         PieceKind::Pawn => "pawn",
@@ -121,6 +142,25 @@ fn parse_square(text: &str) -> Result<Square, String> {
 
 fn square_str(square: Square) -> String {
     format!("{}{}", (b'a' + square.file) as char, square.rank + 1)
+}
+
+/// Runs a depth-N search and returns its evaluation. Clones the position
+/// out of the mutex and releases the lock immediately, rather than holding
+/// it for the whole search — a slow deep search must never block
+/// `make_move` (or anything else) from acquiring the lock while it runs.
+///
+/// Explicitly offloaded to Tauri's blocking thread pool via
+/// `spawn_blocking` rather than left as a plain sync command — a sync
+/// command still runs *somewhere*, and a multi-hundred-millisecond
+/// CPU-bound search sharing a thread with IPC dispatch is exactly what
+/// made move input feel laggy before this existed.
+#[tauri::command]
+pub async fn analyze(state: State<'_, Mutex<Game>>, depth: u32) -> Result<ScoreDto, String> {
+    let game = state.lock().unwrap().clone();
+    let score = tauri::async_runtime::spawn_blocking(move || chesstnut::ai::search(&game, depth))
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(score.into())
 }
 
 #[tauri::command]

@@ -123,16 +123,22 @@ body {
   gap: 0.4rem;
   /* Rough alignment with the board itself (below the black clock above
      it), not pixel-exact — good enough for a rudimentary first pass. */
-  margin-top: 3.5rem;
+  margin-top: 1.5rem;
 }
 
 .eval-bar-column.hidden {
   display: none;
 }
 
+.eval-bar-depth {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.3rem;
+  cursor: pointer;
+}
+
 #eval-bar {
   width: 1.75rem;
-  height: 36rem;
+  height: 33rem;
   display: flex;
   flex-direction: column;
   border: 2px solid #3a2a1a;

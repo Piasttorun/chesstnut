@@ -55,6 +55,10 @@ impl CastlingRights {
     }
 }
 
+// Clone is needed for search (ai::search clones the position at each node
+// of the game tree rather than mutating and undoing moves in place — see
+// that module for why simplicity won out over the speed of make/unmake).
+#[derive(Clone)]
 pub struct Game {
     board: Board,
     turn: Color,

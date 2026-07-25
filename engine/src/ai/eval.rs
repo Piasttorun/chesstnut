@@ -2,7 +2,10 @@ use crate::engine::board::{Board, Color, PieceKind, Square};
 
 use super::Score;
 
-fn piece_value(kind: PieceKind) -> i32 {
+// pub(crate) rather than private so search.rs (a sibling module under `ai`)
+// can reuse it for move ordering — ranking captures by the value of what
+// they take.
+pub(crate) fn piece_value(kind: PieceKind) -> i32 {
     match kind {
         PieceKind::Pawn => 100,
         PieceKind::Knight => 320,
