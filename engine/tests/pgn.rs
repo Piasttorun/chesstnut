@@ -100,6 +100,31 @@ fn to_pgn_includes_headers_and_movetext() {
     assert!(pgn.contains("1. e4 e5"));
 }
 
+#[test]
+fn to_pgn_result_reflects_a_resignation() {
+    let mut game = Game::new();
+    game.make_move(Move::new(Square::new(4, 1), Square::new(4, 3)))
+        .unwrap(); // e4, now Black to move
+
+    game.resign().unwrap(); // Black resigns on its own turn -> White wins
+
+    let pgn = game.to_pgn();
+    assert!(pgn.contains("[Result \"1-0\"]"));
+    assert!(pgn.trim_end().ends_with("1-0"));
+}
+
+#[test]
+fn to_pgn_result_is_undecided_before_the_game_ends() {
+    let game = Game::new();
+    assert!(game.to_pgn().contains("[Result \"*\"]"));
+}
+
+#[test]
+fn to_pgn_date_is_not_the_old_placeholder() {
+    let game = Game::new();
+    assert!(!game.to_pgn().contains("[Date \"????.??.??\"]"));
+}
+
 // ---------- import ----------
 
 #[test]
