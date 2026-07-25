@@ -58,6 +58,7 @@ fn status_str(status: GameStatus) -> &'static str {
         GameStatus::Stalemate => "stalemate",
         GameStatus::DrawByFiftyMoveRule => "draw_fifty_move",
         GameStatus::DrawByRepetition => "draw_repetition",
+        GameStatus::Resignation => "resignation",
         GameStatus::Timeout => "timeout",
     }
 }
@@ -207,6 +208,13 @@ pub fn make_move(
     };
 
     game.make_move(mv).map_err(|_| "illegal move".to_string())?;
+    Ok(view(&game))
+}
+
+#[tauri::command]
+pub fn resign(state: State<Mutex<Game>>) -> Result<GameView, String> {
+    let mut game = state.lock().unwrap();
+    game.resign().map_err(|_| "the game is already over".to_string())?;
     Ok(view(&game))
 }
 

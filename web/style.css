@@ -92,10 +92,21 @@ body {
   font-weight: 600;
 }
 
-#new-game {
+.board-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+#new-game,
+#resign {
   font-size: 1rem;
   padding: 0.5rem 1.25rem;
   cursor: pointer;
+}
+
+#resign {
+  color: #a12525;
+  border-color: #a12525;
 }
 
 #promotion-picker {

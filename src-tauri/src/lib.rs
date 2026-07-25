@@ -16,6 +16,7 @@ pub fn run() {
       commands::load_fen,
       commands::load_pgn,
       commands::select_time_control,
+      commands::resign,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

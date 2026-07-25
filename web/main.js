@@ -40,6 +40,7 @@ const GAME_OVER_STATUSES = new Set([
   "stalemate",
   "draw_fifty_move",
   "draw_repetition",
+  "resignation",
   "timeout",
 ]);
 
@@ -107,6 +108,8 @@ function statusText(view) {
       return "Draw — 50-move rule";
     case "draw_repetition":
       return "Draw — threefold repetition";
+    case "resignation":
+      return `${turn} resigned — ${other} wins`;
     case "check":
       return `${turn} to move — check!`;
     default:
@@ -118,10 +121,13 @@ function statusText(view) {
 // the game-over popup: a short title plus a one-line detail, rather than
 // one combined sentence.
 function gameOverText(view) {
+  const turn = view.turn === "white" ? "White" : "Black";
   const other = view.turn === "white" ? "Black" : "White";
   switch (view.status) {
     case "checkmate":
       return { title: "Checkmate", detail: `${other} wins` };
+    case "resignation":
+      return { title: "Resignation", detail: `${turn} resigned — ${other} wins` };
     case "timeout":
       return { title: "Time's up", detail: `${other} wins on time` };
     case "stalemate":
@@ -396,6 +402,13 @@ async function startNewGame() {
   render(await invoke("new_game"));
 }
 
+async function resign() {
+  if (!confirm(`Are you sure ${currentView.turn === "white" ? "White" : "Black"} wants to resign?`)) {
+    return;
+  }
+  render(await invoke("resign"));
+}
+
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -436,6 +449,7 @@ document.addEventListener("DOMContentLoaded", () => {
   renderLabels();
   renderClockPicker();
   document.getElementById("new-game").addEventListener("click", startNewGame);
+  document.getElementById("resign").addEventListener("click", resign);
   document.getElementById("game-over-close").addEventListener("click", startNewGame);
 
   // Clicking the toggle expands to full history; clicking anywhere else in
