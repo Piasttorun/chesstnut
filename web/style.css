@@ -1,3 +1,18 @@
+:root {
+  --bg: #10141b;
+  --surface: #1b212b;
+  --surface-alt: #212a38;
+  --border: #333d4f;
+  --text: #e7e9ee;
+  --text-muted: #8b93a3;
+  --accent: #d7a44b;
+  --accent-soft: rgba(215, 164, 75, 0.18);
+  --blue: #4f8cff;
+  --danger: #e15252;
+  --radius: 10px;
+  --sidebar-w: 8rem;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -8,7 +23,157 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 1rem;
-  margin-top: 2rem;
+  margin: 0;
+  padding: 2rem 1rem 3rem;
+  min-height: 100vh;
+  color: var(--text);
+  background-color: var(--bg);
+  background-image:
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.035) 0, rgba(255, 255, 255, 0.035) 1px, transparent 1px, transparent 15px),
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.035) 0, rgba(255, 255, 255, 0.035) 1px, transparent 1px, transparent 15px),
+    radial-gradient(ellipse at top, #1a2130 0%, var(--bg) 65%);
+  background-attachment: fixed;
+}
+
+/* ---------- Banner ---------- */
+
+.app-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.85rem 2.5rem;
+  background: linear-gradient(180deg, var(--surface-alt), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.app-banner-icon {
+  width: 2.75rem;
+  height: 2.75rem;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+}
+
+.app-banner-text {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.app-banner-title {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: linear-gradient(135deg, #f0d08a, var(--accent) 60%, #a9762f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 2px 18px rgba(215, 164, 75, 0.35);
+}
+
+.app-banner-subtitle {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--border);
+}
+
+/* ---------- App shell / sidebar ---------- */
+
+.app-shell {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 2rem;
+}
+
+/* One page's worth of nav — currently every entry points at the same
+   content (see PAGES / renderPageContent in main.js). Extending this to a
+   page with different content is a matter of adding a branch there, not
+   changing anything about the shell itself. */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  position: sticky;
+  top: 2rem;
+}
+
+/* Invisible mirror of .sidebar's width on the opposite side of
+   .app-content, so the sidebar taking up real space on the left doesn't
+   drag the board/banner/PGN cluster off the window's true center — same
+   width, no visible box. */
+.shell-spacer {
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.95rem;
+  text-align: left;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sidebar-item:hover {
+  color: var(--text);
+  border-color: var(--border);
+  transform: none;
+  box-shadow: none;
+}
+
+.sidebar-item.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.sidebar-item-marker {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.app-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  flex: 1;
+  min-width: 0;
+}
+
+@keyframes layout-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .game-layout {
@@ -16,6 +181,23 @@ body {
   flex-direction: row;
   align-items: flex-start;
   gap: 1.5rem;
+  animation: layout-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Matches #pgn-panel's width so board-area sits exactly between two equal
+   flanks, keeping it centered under the banner/FEN box above and below —
+   without this the board (with nothing of its own on the left) drifts
+   toward the PGN panel's side. */
+.game-layout-spacer {
+  width: 15rem;
+  flex-shrink: 0;
+}
+
+/* Positioning host for the eval bar (see .eval-bar-column) — it needs a
+   fixed point to pop in/out next to without disturbing board-column or
+   #pgn-panel's position. */
+.board-area {
+  position: relative;
 }
 
 .board-column {
@@ -30,6 +212,7 @@ body {
   display: grid;
   grid-template-columns: 1.5rem repeat(8, 4.5rem);
   grid-template-rows: repeat(8, 4.5rem) 1.5rem;
+  border-radius: var(--radius);
 }
 
 #board {
@@ -39,6 +222,11 @@ body {
   grid-template-columns: repeat(8, 1fr);
   grid-template-rows: repeat(8, 1fr);
   border: 2px solid #3a2a1a;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow:
+    0 25px 60px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(215, 164, 75, 0.15);
 }
 
 .square {
@@ -48,6 +236,8 @@ body {
   justify-content: center;
   user-select: none;
   cursor: pointer;
+  transition: box-shadow 0.15s ease;
+  box-shadow: inset 0 0 0 0 transparent;
 }
 
 .square.light {
@@ -59,7 +249,26 @@ body {
 }
 
 .square.selected {
-  box-shadow: inset 0 0 0 3px #2f6fed;
+  box-shadow: inset 0 0 0 3px var(--blue);
+}
+
+.square.last-move {
+  box-shadow: inset 0 0 0 999px rgba(214, 163, 68, 0.35);
+}
+
+.square.selected.last-move {
+  box-shadow: inset 0 0 0 999px rgba(214, 163, 68, 0.35), inset 0 0 0 3px var(--blue);
+}
+
+@keyframes legal-dot-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 0.85;
+  }
 }
 
 .square.legal-target::after {
@@ -70,12 +279,61 @@ body {
   border-radius: 50%;
   background: rgba(47, 111, 237, 0.55);
   pointer-events: none;
+  animation: legal-dot-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes king-check-pulse {
+  0%, 100% {
+    box-shadow: inset 0 0 0 999px rgba(225, 82, 82, 0);
+  }
+  50% {
+    box-shadow: inset 0 0 0 999px rgba(225, 82, 82, 0.55);
+  }
+}
+
+.square.king-in-check {
+  animation: king-check-pulse 1s ease-in-out infinite;
 }
 
 .piece-sprite {
   width: 85%;
   height: 85%;
   pointer-events: none;
+  position: relative;
+  z-index: 1;
+}
+
+/* The piece actually being dragged — a clone that follows the pointer,
+   positioned via left/top set from JS on mousemove. The "real" piece at
+   its origin square is skipped entirely while dragging (see render()'s
+   isDragSource check), so this is the only copy on screen. */
+.drag-ghost {
+  /* width/height are set inline from JS, matching the source piece's own
+     rendered size exactly (see beginDrag in main.js) */
+  position: fixed;
+  top: 0;
+  left: 0;
+  transform: translate(-50%, -50%) scale(1.1);
+  pointer-events: none;
+  z-index: 100;
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.55));
+}
+
+.square.drop-hover {
+  box-shadow: inset 0 0 0 3px var(--accent);
+}
+
+@keyframes piece-slide {
+  from {
+    transform: translate(var(--dx, 0), var(--dy, 0));
+  }
+  to {
+    transform: translate(0, 0);
+  }
+}
+
+.piece-sprite.piece-arriving {
+  animation: piece-slide 0.12s ease-out;
 }
 
 .rank-label,
@@ -84,17 +342,41 @@ body {
   align-items: center;
   justify-content: center;
   font-size: 0.85rem;
-  color: #444;
+  color: var(--text-muted);
 }
 
 #status {
   font-size: 1.1rem;
   font-weight: 600;
+  color: var(--text);
+  min-height: 1.4em;
 }
 
 .board-buttons {
   display: flex;
   gap: 0.5rem;
+}
+
+button {
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* transform + border-color only — no box-shadow transition. This window
+     is running on WSLg's software (Zink/llvmpipe) rendering path rather
+     than a real GPU, and a blurred box-shadow recomputed every transition
+     frame is expensive enough there to make hover feel laggy. */
+  transition: transform 0.1s ease, border-color 0.1s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+}
+
+button:active {
+  transform: translateY(0);
 }
 
 #new-game,
@@ -112,27 +394,37 @@ body {
   margin-top: 1rem;
   font-size: 0.9rem;
   cursor: pointer;
+  color: var(--text);
 }
 
 /* ---------- Eval bar ---------- */
 
 .eval-bar-column {
+  /* Out of .game-layout's flex flow entirely, anchored to .board-area
+     (its nearest positioned ancestor) just left of the board — so
+     toggling it never shifts board-column, #pgn-panel, or anything above/
+     below them. It only ever pops in/out in place. */
+  position: absolute;
+  top: 1.5rem;
+  right: calc(100% + 1.5rem);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 0.4rem;
-  /* Rough alignment with the board itself (below the black clock above
-     it), not pixel-exact — good enough for a rudimentary first pass. */
-  margin-top: 1.5rem;
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
 .eval-bar-column.hidden {
-  display: none;
+  opacity: 0;
+  transform: scale(0.92);
+  pointer-events: none;
 }
 
 .eval-bar-depth {
   font-size: 0.8rem;
-  padding: 0.2rem 0.3rem;
+  padding: 0.25rem 0.35rem;
   cursor: pointer;
 }
 
@@ -144,14 +436,24 @@ body {
   border: 2px solid #3a2a1a;
   border-radius: 4px;
   overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  transition: box-shadow 0.3s ease;
+}
+
+#eval-bar.mate-found {
+  box-shadow: 0 0 0 2px var(--accent), 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 .eval-bar-segment {
   width: 100%;
+  /* The bounce-then-settle easing reads as the bar "catching up" to the
+     new evaluation rather than jumping to it — most noticeable during a
+     tactical swing when a capture is analyzed. */
+  transition: height 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .eval-bar-black {
-  background: #3a2a1a;
+  background: #2a2a2e;
 }
 
 .eval-bar-white {
@@ -162,11 +464,13 @@ body {
   font-family: ui-monospace, monospace;
   font-size: 0.85rem;
   font-weight: 700;
+  color: var(--text);
+  transition: color 0.2s ease;
 }
 
 #resign {
-  color: #a12525;
-  border-color: #a12525;
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 #promotion-picker {
@@ -176,12 +480,13 @@ body {
   transform: translate(-50%, -50%);
   display: flex;
   gap: 0.5rem;
-  background: white;
-  border: 2px solid #3a2a1a;
+  background: var(--surface);
+  border: 2px solid var(--accent);
   border-radius: 8px;
   padding: 0.75rem;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   z-index: 10;
+  animation: modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 #promotion-picker.hidden {
@@ -197,7 +502,8 @@ body {
 }
 
 #promotion-picker button:hover {
-  background: #eee;
+  background: var(--surface-alt);
+  transform: scale(1.08);
 }
 
 #promotion-picker img {
@@ -212,10 +518,16 @@ body {
   width: 15rem;
   max-height: 37.5rem;
   overflow-y: auto;
-  border: 2px solid #3a2a1a;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fafafa;
+  background: var(--surface);
   cursor: pointer;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  /* .board-column's own top edge is the black clock, not the board — the
+     board itself starts one clock-height + gap lower. Without this, the
+     panel's top (which has nothing above it) sits noticeably higher than
+     the board it's supposed to line up with. */
+  margin-top: 3.4rem;
 }
 
 #pgn-header {
@@ -225,8 +537,8 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0.5rem 0.75rem;
-  background: #3a2a1a;
-  color: white;
+  background: #2a1f14;
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -244,9 +556,9 @@ body {
 #pgn-toggle {
   padding: 0.4rem 0.75rem;
   font-size: 0.85rem;
-  color: #2f6fed;
+  color: var(--blue);
   text-align: center;
-  border-bottom: 1px solid #ddd;
+  border-bottom: 1px solid var(--border);
 }
 
 #pgn-toggle.hidden {
@@ -268,12 +580,12 @@ body {
 }
 
 .pgn-move-number {
-  color: #777;
+  color: var(--text-muted);
   width: 2.5rem;
 }
 
 #pgn-table tr:nth-child(even) {
-  background: #f0f0f0;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* ---------- FEN box ---------- */
@@ -286,6 +598,7 @@ body {
 
 #fen-box label {
   font-weight: 600;
+  color: var(--text-muted);
 }
 
 #fen-text {
@@ -293,6 +606,10 @@ body {
   font-size: 0.85rem;
   width: 28rem;
   padding: 0.35rem 0.5rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 #fen-box button {
@@ -310,11 +627,12 @@ body {
   font-weight: 700;
   padding: 0.35rem 1.1rem;
   border-radius: 6px;
-  background: #eee;
-  color: #333;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
   min-width: 6rem;
   text-align: center;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
 .clock.clock-hidden {
@@ -322,13 +640,132 @@ body {
 }
 
 .clock.clock-active {
-  background: #2f6fed;
+  background: var(--blue);
+  border-color: var(--blue);
   color: white;
+  box-shadow: 0 0 18px rgba(79, 140, 255, 0.45);
+}
+
+/* Spread only, no blur (unlike a normal glow) — this runs continuously
+   for as long as a clock is under the low threshold, and a blurred
+   shadow recomputed every frame is exactly the kind of continuous paint
+   cost that's expensive on WSLg's software rendering path. */
+@keyframes clock-low-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 1px rgba(198, 40, 40, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(198, 40, 40, 0.85);
+  }
 }
 
 .clock.clock-low {
   background: #c62828;
+  border-color: #c62828;
   color: white;
+  animation: clock-low-pulse 1s ease-in-out infinite;
+}
+
+/* ---------- Settings widget ---------- */
+
+.settings-widget {
+  position: fixed;
+  top: 1.25rem;
+  right: 1.25rem;
+  z-index: 60;
+}
+
+.settings-toggle {
+  font-size: 0.8rem;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+}
+
+.settings-panel {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  width: 17rem;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  animation: modal-in 0.15s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.settings-panel.hidden {
+  display: none;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+/* The interaction-mode row specifically stacks — "Move pieces by" plus two
+   buttons was too tight for one line even at this panel's width and ended
+   up clipping "Click"'s last letter. */
+.settings-row.settings-row-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+
+.settings-row-stacked .settings-choice {
+  align-self: stretch;
+}
+
+.settings-row-stacked .settings-choice-option {
+  flex: 1;
+  text-align: center;
+}
+
+.settings-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.settings-choice {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.settings-choice-option {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+  border: none;
+  border-radius: 0;
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.settings-choice-option:hover {
+  color: var(--text);
+}
+
+.settings-choice-option.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.settings-checkbox-row {
+  justify-content: flex-start;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.settings-checkbox-row input {
+  cursor: pointer;
 }
 
 /* ---------- Modals ---------- */
@@ -339,7 +776,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  /* No backdrop-filter blur — it reads the whole window's pixels every
+     frame the overlay is up, which is a heavy, continuous cost under
+     WSLg's software rendering path. A plain darker overlay reads almost
+     as well and costs nothing ongoing. */
+  background: rgba(0, 0, 0, 0.78);
   z-index: 50;
 }
 
@@ -347,23 +788,38 @@ body {
   display: none;
 }
 
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
 .modal {
-  background: white;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1.5rem 2rem;
   min-width: 22rem;
   max-width: 90vw;
   text-align: center;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  animation: modal-in 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .modal h2 {
   margin-top: 0;
+  color: var(--accent);
 }
 
 #game-over-detail {
   font-size: 1.15rem;
-  color: #333;
+  color: var(--text);
 }
 
 #game-over-close {
@@ -387,23 +843,24 @@ body {
   justify-content: center;
   gap: 0.15rem;
   padding: 0.75rem 0.5rem;
-  border: 1px solid #ccc;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fafafa;
+  background: var(--surface-alt);
   cursor: pointer;
 }
 
 .clock-preset:hover {
-  background: #eef4ff;
-  border-color: #2f6fed;
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
 .clock-preset-label {
   font-size: 1.2rem;
   font-weight: 700;
+  color: var(--text);
 }
 
 .clock-preset-name {
   font-size: 0.75rem;
-  color: #777;
+  color: var(--text-muted);
 }

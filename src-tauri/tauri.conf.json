@@ -11,8 +11,8 @@
     "windows": [
       {
         "title": "Chesstnut",
-        "width": 960,
-        "height": 1000,
+        "width": 1520,
+        "height": 1180,
         "resizable": true,
         "fullscreen": false
       }

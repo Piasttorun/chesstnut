@@ -6,55 +6,100 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Chesstnut</h1>
+  <div class="app-shell">
+    <nav id="sidebar" class="sidebar"></nav>
 
-  <div class="game-layout">
-    <div id="eval-bar-column" class="eval-bar-column hidden">
-      <select id="eval-bar-depth" class="eval-bar-depth">
-        <option value="1">Depth 1</option>
-        <option value="2">Depth 2</option>
-        <option value="3" selected>Depth 3</option>
-        <option value="4">Depth 4</option>
-      </select>
-      <div id="eval-bar">
-        <div id="eval-bar-black" class="eval-bar-segment eval-bar-black"></div>
-        <div id="eval-bar-white" class="eval-bar-segment eval-bar-white"></div>
+    <div class="app-content">
+      <div class="app-banner">
+        <img class="app-banner-icon" src="pieces/bN.svg" alt="" aria-hidden="true" />
+        <div class="app-banner-text">
+          <span class="app-banner-title">Chesstnut</span>
+          <span class="app-banner-subtitle" id="page-heading-subtitle">Play</span>
+        </div>
+        <img class="app-banner-icon" src="pieces/wN.svg" alt="" aria-hidden="true" />
       </div>
-      <div id="eval-bar-text"></div>
+
+      <div class="game-layout">
+        <!-- Invisible mirror of #pgn-panel's width, purely so board-area
+             sits centered between two equal flanks. The eval bar itself is
+             absolutely positioned inside board-area (see style.css) and
+             doesn't participate in this flex row at all, so toggling it
+             on/off never moves anything else — it just pops in place. -->
+        <div class="game-layout-spacer" aria-hidden="true"></div>
+
+        <div class="board-area">
+          <div id="eval-bar-column" class="eval-bar-column hidden">
+            <select id="eval-bar-depth" class="eval-bar-depth">
+              <option value="1">Depth 1</option>
+              <option value="2">Depth 2</option>
+              <option value="3" selected>Depth 3</option>
+              <option value="4">Depth 4</option>
+            </select>
+            <div id="eval-bar">
+              <div id="eval-bar-black" class="eval-bar-segment eval-bar-black"></div>
+              <div id="eval-bar-white" class="eval-bar-segment eval-bar-white"></div>
+            </div>
+            <div id="eval-bar-text"></div>
+          </div>
+
+          <div class="board-column">
+            <div id="black-clock" class="clock"></div>
+            <div class="board-wrapper">
+              <div id="board"></div>
+              <div id="promotion-picker" class="hidden"></div>
+            </div>
+            <div id="white-clock" class="clock"></div>
+            <p id="status"></p>
+            <div class="board-buttons">
+              <button id="new-game">New Game</button>
+              <button id="resign">Resign</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="pgn-panel">
+          <div id="pgn-header">
+            <span>PGN</span>
+            <span class="pgn-header-buttons">
+              <button id="import-pgn">Import</button>
+              <button id="copy-pgn">Copy</button>
+            </span>
+          </div>
+          <div id="pgn-toggle" class="hidden">··· show earlier moves</div>
+          <table id="pgn-table"></table>
+        </div>
+      </div>
+
+      <div id="fen-box">
+        <label for="fen-text">FEN</label>
+        <input id="fen-text" type="text" />
+        <button id="load-fen">Load</button>
+        <button id="copy-fen">Copy</button>
+      </div>
     </div>
 
-    <div class="board-column">
-      <div id="black-clock" class="clock"></div>
-      <div class="board-wrapper">
-        <div id="board"></div>
-        <div id="promotion-picker" class="hidden"></div>
-      </div>
-      <div id="white-clock" class="clock"></div>
-      <p id="status"></p>
-      <div class="board-buttons">
-        <button id="new-game">New Game</button>
-        <button id="resign">Resign</button>
-      </div>
-    </div>
-
-    <div id="pgn-panel">
-      <div id="pgn-header">
-        <span>PGN</span>
-        <span class="pgn-header-buttons">
-          <button id="import-pgn">Import</button>
-          <button id="copy-pgn">Copy</button>
-        </span>
-      </div>
-      <div id="pgn-toggle" class="hidden">··· show earlier moves</div>
-      <table id="pgn-table"></table>
-    </div>
+    <div class="shell-spacer" aria-hidden="true"></div>
   </div>
 
-  <div id="fen-box">
-    <label for="fen-text">FEN</label>
-    <input id="fen-text" type="text" />
-    <button id="load-fen">Load</button>
-    <button id="copy-fen">Copy</button>
+  <!-- Small, extendable preferences widget — currently just interaction
+       mode and sound, both persisted to localStorage. New settings later
+       are a new row here plus a field in main.js's settings object, not a
+       restructure. -->
+  <div id="settings-widget" class="settings-widget">
+    <button id="settings-toggle" class="settings-toggle">Settings</button>
+    <div id="settings-panel" class="settings-panel hidden">
+      <div class="settings-row settings-row-stacked">
+        <span class="settings-label">Move pieces by</span>
+        <div class="settings-choice">
+          <button type="button" class="settings-choice-option" data-mode="drag">Drag</button>
+          <button type="button" class="settings-choice-option" data-mode="click">Click</button>
+        </div>
+      </div>
+      <label class="settings-row settings-checkbox-row">
+        <input type="checkbox" id="settings-mute" />
+        <span>Mute sound</span>
+      </label>
+    </div>
   </div>
 
   <div id="clock-picker-overlay" class="modal-overlay hidden">
