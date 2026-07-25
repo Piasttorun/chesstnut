@@ -176,18 +176,64 @@ function renderClocks(view) {
 // toward the (unreached) edge: solving tanh(100 / S) = 1/3 for S.
 const EVAL_BAR_SENSITIVITY_CP = 100 / Math.atanh(1 / 3);
 // However lopsided the material is, the trailing side keeps at least this
-// much of the bar — full 0%/100% is reserved for an actual checkmate below,
-// not just a big material swing.
+// much of the bar — full 0%/100% is reserved for an actual checkmate/forced
+// mate below, not just a big material swing.
 const EVAL_BAR_FLOOR_PERCENT = 10;
+
+// The last completed analyze() result — { kind: "centipawns"|"mateIn", value }
+// — or null before any search has finished for the current position. Reset
+// to null every render() so a stale number from the *previous* position
+// never gets shown against the new one while the fresh search is running.
+let lastAnalysis = null;
 
 function whitePercentFor(view) {
   if (view.status === "checkmate") {
-    // The side to move has no moves and just got mated — this is the only
-    // case that empties the bar completely.
+    // The side to move has no moves and just got mated — this, and a
+    // forced mate the search itself found (below), are the only cases
+    // that empty the bar completely.
     return view.turn === "white" ? 0 : 100;
   }
-  const t = Math.tanh(view.score / EVAL_BAR_SENSITIVITY_CP); // -1..1
+  if (lastAnalysis && lastAnalysis.kind === "mateIn") {
+    return lastAnalysis.value > 0 ? 100 : 0;
+  }
+  const score = lastAnalysis ? lastAnalysis.value : view.score;
+  const t = Math.tanh(score / EVAL_BAR_SENSITIVITY_CP); // -1..1
   return 50 + t * (50 - EVAL_BAR_FLOOR_PERCENT);
+}
+
+function evalBarText(view) {
+  if (lastAnalysis && lastAnalysis.kind === "mateIn") {
+    return `M${lastAnalysis.value}`;
+  }
+  const score = lastAnalysis ? lastAnalysis.value : view.score;
+  const pawns = (score / 100).toFixed(1);
+  return score >= 0 ? `+${pawns}` : pawns;
+}
+
+function paintEvalBar(view) {
+  const whitePercent = whitePercentFor(view);
+  document.getElementById("eval-bar-white").style.height = `${whitePercent}%`;
+  document.getElementById("eval-bar-black").style.height = `${100 - whitePercent}%`;
+  document.getElementById("eval-bar-text").textContent = evalBarText(view);
+}
+
+// A depth-N search is far more expensive than everything else the app
+// does, so it's a separate command the frontend calls only when the
+// position changes — not folded into the constantly-polled game state.
+async function updateAnalysis(view) {
+  const depth = Number(document.getElementById("eval-bar-depth").value);
+  let result;
+  try {
+    result = await invoke("analyze", { depth });
+  } catch (err) {
+    console.error("analyze failed:", err);
+    return; // leave the bar showing whatever it had before
+  }
+  // The position may have moved on again by the time a deep search
+  // finishes — only paint a result that's still for the current position.
+  if (view !== currentView) return;
+  lastAnalysis = result;
+  paintEvalBar(view);
 }
 
 function renderEvalBar(view) {
@@ -196,12 +242,11 @@ function renderEvalBar(view) {
   column.classList.toggle("hidden", !showEvalBar);
   if (!showEvalBar) return;
 
-  const whitePercent = whitePercentFor(view);
-  document.getElementById("eval-bar-white").style.height = `${whitePercent}%`;
-  document.getElementById("eval-bar-black").style.height = `${100 - whitePercent}%`;
-
-  const pawns = (view.score / 100).toFixed(1);
-  document.getElementById("eval-bar-text").textContent = view.score >= 0 ? `+${pawns}` : pawns;
+  // Paint instantly with the cheap material score (or a still-valid stale
+  // analysis, e.g. after just toggling the checkbox back on), then kick off
+  // the real search in the background.
+  paintEvalBar(view);
+  updateAnalysis(view);
 }
 
 function stopClockPolling() {
@@ -355,6 +400,7 @@ let currentView = null;
 
 function render(view) {
   currentView = view;
+  lastAnalysis = null; // fresh position — clear until updateAnalysis() below resolves
   const board = document.getElementById("board");
   board.innerHTML = "";
 
@@ -489,6 +535,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("resign").addEventListener("click", resign);
   document.getElementById("game-over-close").addEventListener("click", startNewGame);
   document.getElementById("eval-bar-checkbox").addEventListener("change", () => renderEvalBar(currentView));
+  document.getElementById("eval-bar-depth").addEventListener("change", () => renderEvalBar(currentView));
 
   // Clicking the toggle expands to full history; clicking anywhere else in
   // the panel while expanded collapses it back to the last

@@ -17,6 +17,7 @@ pub fn run() {
       commands::load_pgn,
       commands::select_time_control,
       commands::resign,
+      commands::analyze,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
