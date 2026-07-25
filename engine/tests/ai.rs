@@ -43,9 +43,33 @@ fn evaluate_favors_white_up_a_queen() {
     let mut board = Board::empty();
     place(&mut board, Square::new(4, 0), PieceKind::King, Color::White);
     place(&mut board, Square::new(4, 7), PieceKind::King, Color::Black);
-    place(&mut board, Square::new(3, 0), PieceKind::Queen, Color::White);
+    // b2 rather than the queen's own starting square (d1) — the
+    // piece-square table gives d1 a small penalty, which would make this
+    // a test of the table instead of a test of material counting.
+    place(&mut board, Square::new(1, 1), PieceKind::Queen, Color::White);
 
     assert_eq!(evaluate(&board), Score::Centipawns(900));
+}
+
+#[test]
+fn evaluate_prefers_a_centralized_knight_over_a_rim_knight() {
+    let mut white_board = Board::empty();
+    place(&mut white_board, Square::new(4, 0), PieceKind::King, Color::White);
+    place(&mut white_board, Square::new(4, 7), PieceKind::King, Color::Black);
+    place(&mut white_board, Square::new(4, 4), PieceKind::Knight, Color::White);
+
+    let mut rim_board = Board::empty();
+    place(&mut rim_board, Square::new(4, 0), PieceKind::King, Color::White);
+    place(&mut rim_board, Square::new(4, 7), PieceKind::King, Color::Black);
+    place(&mut rim_board, Square::new(0, 0), PieceKind::Knight, Color::White);
+
+    let Score::Centipawns(centralized) = evaluate(&white_board) else {
+        panic!("expected a centipawn score");
+    };
+    let Score::Centipawns(rim) = evaluate(&rim_board) else {
+        panic!("expected a centipawn score");
+    };
+    assert!(centralized > rim, "centralized knight ({centralized}) should score higher than a rim knight ({rim})");
 }
 
 #[test]

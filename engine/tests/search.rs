@@ -41,9 +41,11 @@ fn search_returns_centipawns_in_a_quiet_position() {
     place(&mut board, Square::new(3, 0), PieceKind::Queen, Color::White); // d1
     let game = Game::from_board(board, Color::White);
 
-    // No captures are available to either side, so a shallow search can't
-    // find anything better or worse than the static material count.
-    assert_eq!(search(&game, 1), Score::Centipawns(900));
+    // No captures are available to either side, but the queen can still
+    // reposition onto a slightly better square per the piece-square table
+    // (d1 -> e.g. a center file), so the depth-1 score is material plus
+    // that small positional gain rather than the bare material count.
+    assert_eq!(search(&game, 1), Score::Centipawns(905));
 }
 
 #[test]

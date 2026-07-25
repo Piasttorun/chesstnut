@@ -16,14 +16,25 @@
 //!    that helps — that's why even modern engines like Stockfish stay
 //!    CPU-bound. Next lever here is a transposition table, not more
 //!    threads.
-//! 4. **Play vs AI (next)** — wire an [`Engine`] (starting with
-//!    [`SearchEngine`]) into the actual game loop so it plays a side
-//!    instead of only being consulted for the eval bar. Once there's more
-//!    than one real [`Engine`] worth choosing between (this search vs.
-//!    [`RandomEngine`], and later NNUE / external UCI engines / an
-//!    LLM-backed one), that becomes a settings choice rather than a
-//!    hardcoded one.
-//! 5. **(Speculative, much later)** GPU acceleration only becomes relevant
+//! 4. **Play vs AI (done)** — an [`Engine`] ([`SearchEngine`]) wired into
+//!    the actual game loop, plus a small hand-curated [`book_move`] opening
+//!    book so early moves don't waste search time re-deriving known theory.
+//! 5. **Piece-square tables (done)** — [`evaluate`] no longer scores by
+//!    material alone; each piece adds a position-dependent bonus/penalty
+//!    (centralized knights, advanced pawns, a tucked-away king, etc.) from
+//!    the classic Michniewski simplified-evaluation tables. This is what
+//!    stops the engine from treating all quiet moves as equally good (the
+//!    cause of the earlier repeated-rook-shuffle behavior with material-only
+//!    eval) and gives it an actual sense of "good squares." No game-phase
+//!    detection yet, so the king uses one table throughout — no separate
+//!    endgame table that pulls it toward the center once queens are off.
+//! 6. **(Next candidates)** — a transposition table (search speed, not
+//!    strength, but unlocks deeper search in the same time budget); an
+//!    endgame king table + simple phase detection (interpolate between
+//!    tables by material remaining); more `Engine`s to choose between
+//!    (NNUE / external UCI / an LLM-backed one) once there's more than one
+//!    real one worth offering as a settings choice.
+//! 7. **(Speculative, much later)** GPU acceleration only becomes relevant
 //!    if evaluation moves to a neural network (AlphaZero/Leela Chess Zero
 //!    style) — a different architecture from stage 3's search, not an
 //!    optimization of it. Not planned unless a later stage actually wants

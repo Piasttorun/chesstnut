@@ -98,6 +98,15 @@ pub struct Game {
     // weren't imported from an annotated PGN. Store-only for now — nothing
     // reads this yet beyond `move_clock_log()` itself.
     move_clock_log: Vec<Option<u64>>,
+    // Calendar date the game was created, for the PGN `[Date ...]` header.
+    // Captured once at construction rather than at export time so a PGN
+    // copied mid-game still reflects when the game actually started.
+    created_date: String,
+}
+
+// PGN's own date format: "YYYY.MM.DD".
+fn today_string() -> String {
+    chrono::Local::now().format("%Y.%m.%d").to_string()
 }
 
 impl Game {
@@ -131,6 +140,7 @@ impl Game {
             black_remaining_ms: 0,
             turn_started_at: None,
             move_clock_log: Vec::new(),
+            created_date: today_string(),
         };
         game.history.push((game.board, game.turn));
         game
@@ -164,6 +174,7 @@ impl Game {
             black_remaining_ms: 0,
             turn_started_at: None,
             move_clock_log: Vec::new(),
+            created_date: today_string(),
         };
         game.history.push((game.board, game.turn));
         Ok(game)
@@ -299,16 +310,39 @@ impl Game {
     }
 
     pub fn to_pgn(&self) -> String {
-        // Placeholder header values — this is a local pass-and-play game
-        // with no event/player metadata to fill in for real.
-        let headers = "[Event \"Casual Game\"]\n\
+        // Checkmate/Resignation/Timeout all share the "side to move is the
+        // loser" convention `status()` and `resign()` already use, so the
+        // winner is just `self.turn.opponent()` — no separate bookkeeping
+        // for who resigned or got mated.
+        let result = match self.status() {
+            GameStatus::Checkmate | GameStatus::Resignation | GameStatus::Timeout => {
+                match self.turn.opponent() {
+                    Color::White => "1-0",
+                    Color::Black => "0-1",
+                }
+            }
+            GameStatus::Stalemate | GameStatus::DrawByFiftyMoveRule | GameStatus::DrawByRepetition => "1/2-1/2",
+            GameStatus::InProgress | GameStatus::Check => "*",
+        };
+
+        // White/Black/Round stay placeholders — this is a local
+        // pass-and-play game with no real event/player metadata to fill in.
+        let date = &self.created_date;
+        let headers = format!(
+            "[Event \"Casual Game\"]\n\
              [Site \"Chesstnut\"]\n\
-             [Date \"????.??.??\"]\n\
+             [Date \"{date}\"]\n\
              [Round \"?\"]\n\
              [White \"?\"]\n\
              [Black \"?\"]\n\
-             [Result \"*\"]\n\n";
-        format!("{headers}{}", pgn::movetext(&self.move_history))
+             [Result \"{result}\"]\n\n"
+        );
+        let movetext = pgn::movetext(&self.move_history);
+        if movetext.is_empty() {
+            format!("{headers}{result}")
+        } else {
+            format!("{headers}{movetext} {result}")
+        }
     }
 
     /// All legal moves for the piece on `from`, including castling and en
