@@ -11,7 +11,8 @@ use tauri::State;
 /// position it's analyzing is stale and stop early rather than run to
 /// completion for a result the frontend will just discard.
 fn bump_generation(generation: &AtomicU64) {
-    generation.fetch_add(1, Ordering::Relaxed);
+    let previous = generation.fetch_add(1, Ordering::Relaxed);
+    log::info!("generation bumped: {} -> {}", previous, previous + 1);
 }
 
 #[derive(Serialize)]
@@ -64,6 +65,25 @@ impl From<chesstnut::ai::Score> for ScoreDto {
             chesstnut::ai::Score::MateIn(n) => ScoreDto::MateIn(n),
         }
     }
+}
+
+/// `request_ai_move`'s result — the resulting position (nested under
+/// `view`, read on the frontend as `result.view.fen` etc., same GameView
+/// shape every other command returns) plus which squares the engine
+/// actually moved between. The frontend needs that explicitly: unlike a
+/// human move, where it already knows from/to because it's the one that
+/// initiated the move, here it only finds out what happened after the
+/// fact — and it needs from/to for the same last-move highlight and
+/// slide-in animation a human move gets. Deliberately NOT `#[serde(flatten)]`
+/// — flattening a struct that itself carries `rename_all = "camelCase"`
+/// is exactly the kind of thing worth not relying on without direct
+/// verification, and a plain nested field removes any doubt about it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiMoveResult {
+    view: GameView,
+    from: String,
+    to: String,
 }
 
 fn kind_str(kind: PieceKind) -> &'static str {
@@ -177,12 +197,35 @@ pub async fn analyze(
 ) -> Result<ScoreDto, String> {
     let game = state.lock().unwrap().clone();
     let expected_generation = generation.load(Ordering::Relaxed);
+    log::info!(
+        "analyze: start depth={depth} fen={} turn={:?} generation={expected_generation}",
+        game.to_fen(),
+        game.turn()
+    );
     let cancel = chesstnut::ai::Cancellation::tracking(generation.inner().clone(), expected_generation);
     let score = tauri::async_runtime::spawn_blocking(move || {
         chesstnut::ai::search_cancellable(&game, depth, &cancel)
     })
     .await
     .map_err(|err| err.to_string())?;
+    log::info!(
+        "analyze: done depth={depth} score={score:?} generation_now={} expected={expected_generation}",
+        generation.load(Ordering::Relaxed)
+    );
+
+    // A cancelled search's "score" is `Cancellation`'s internal sentinel
+    // value, not a real evaluation of anything — Score::MateIn(0), in
+    // particular, is impossible to produce honestly (see to_score's
+    // comment) and was being returned as if it were a legitimate result
+    // whenever another command (most commonly request_ai_move finishing
+    // first, since it's usually a fast book move) bumped generation while
+    // this search was still in flight. request_ai_move already refuses to
+    // act on a cancelled result the same way; analyze wasn't doing the
+    // equivalent check at all.
+    if generation.load(Ordering::Relaxed) != expected_generation {
+        return Err("the position changed before analysis finished".to_string());
+    }
+
     Ok(score.into())
 }
 
@@ -286,6 +329,63 @@ pub fn make_move(
     game.make_move(mv).map_err(|_| "illegal move".to_string())?;
     bump_generation(&generation);
     Ok(view(&game))
+}
+
+/// The "AI's turn" counterpart to `make_move` — asks the engine for a move
+/// and plays it, rather than taking one from the frontend. Same shape as
+/// `analyze`: compute on a snapshot cloned off the mutex (a search this
+/// slow must never hold the lock and block anything else — legal_moves,
+/// resign, get_state's clock poll — while it runs), then re-lock just long
+/// enough to apply whatever it decided to the live position.
+///
+/// Also cancellation-aware like `analyze`, but for a sharper reason here:
+/// a *human* move superseding a stale analysis is normal and just means
+/// discarding a number nobody's looking at anymore. Here, though, the
+/// position can change out from under a multi-second think because the
+/// player hit "New Game," resigned, or loaded a different FEN entirely —
+/// and applying the engine's move to *that* would be a real correctness
+/// bug (a move from one game landing in a completely different one), not
+/// just a stale eval bar.
+#[tauri::command]
+pub async fn request_ai_move(
+    state: State<'_, Mutex<Game>>,
+    generation: State<'_, Arc<AtomicU64>>,
+    depth: u32,
+) -> Result<AiMoveResult, String> {
+    let game = state.lock().unwrap().clone();
+    let expected_generation = generation.load(Ordering::Relaxed);
+    log::info!(
+        "request_ai_move: start depth={depth} fen={} turn={:?} generation={expected_generation}",
+        game.to_fen(),
+        game.turn()
+    );
+    let cancel = chesstnut::ai::Cancellation::tracking(generation.inner().clone(), expected_generation);
+    let mv = tauri::async_runtime::spawn_blocking(move || {
+        chesstnut::ai::best_move_cancellable(&game, depth, &cancel)
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    log::info!(
+        "request_ai_move: search returned mv={mv:?} generation_now={} expected={expected_generation}",
+        generation.load(Ordering::Relaxed)
+    );
+
+    if generation.load(Ordering::Relaxed) != expected_generation {
+        log::info!("request_ai_move: aborting, generation changed while thinking");
+        return Err("the position changed before the engine finished thinking".to_string());
+    }
+
+    let mv = mv.ok_or_else(|| "no legal move available".to_string())?;
+
+    let mut game = state.lock().unwrap();
+    game.make_move(mv).map_err(|_| "the engine's chosen move is no longer legal".to_string())?;
+    bump_generation(&generation);
+    log::info!("request_ai_move: applied {mv:?}, new fen={}", game.to_fen());
+    Ok(AiMoveResult {
+        view: view(&game),
+        from: square_str(mv.from),
+        to: square_str(mv.to),
+    })
 }
 
 #[tauri::command]

@@ -1,3 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["engine", "src-tauri"]
+
+# Even in a `dev` build (what `cargo tauri dev` uses), the search itself
+# needs to run at real speed — unoptimized debug code was ~10x slower
+# (depth 4 went from 164ms to 1.9s in the same benchmark). Overriding just
+# this one package keeps the rest of the workspace — src-tauri and its GTK/
+# webkit dependencies, which are what actually make a full rebuild slow —
+# on the fast-to-compile debug profile; only `chesstnut` itself pays for
+# optimization, and only when its own source changes.
+[profile.dev.package.chesstnut]
+opt-level = 3
