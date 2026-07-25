@@ -13,6 +13,14 @@ pub struct PieceDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ClockDto {
+    white_ms: u64,
+    black_ms: u64,
+    increment_ms: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GameView {
     board: Vec<Option<PieceDto>>,
     turn: &'static str,
@@ -20,6 +28,8 @@ pub struct GameView {
     move_history: Vec<String>,
     fen: String,
     pgn: String,
+    awaiting_clock_choice: bool,
+    clock: Option<ClockDto>,
 }
 
 fn kind_str(kind: PieceKind) -> &'static str {
@@ -48,6 +58,7 @@ fn status_str(status: GameStatus) -> &'static str {
         GameStatus::Stalemate => "stalemate",
         GameStatus::DrawByFiftyMoveRule => "draw_fifty_move",
         GameStatus::DrawByRepetition => "draw_repetition",
+        GameStatus::Timeout => "timeout",
     }
 }
 
@@ -63,6 +74,16 @@ fn view(game: &Game) -> GameView {
         })
         .collect();
 
+    let clock = if game.is_clock_enabled() {
+        Some(ClockDto {
+            white_ms: game.remaining_ms(Color::White).unwrap_or(0),
+            black_ms: game.remaining_ms(Color::Black).unwrap_or(0),
+            increment_ms: game.increment_ms().unwrap_or(0),
+        })
+    } else {
+        None
+    };
+
     GameView {
         board,
         turn: color_str(game.turn()),
@@ -70,6 +91,8 @@ fn view(game: &Game) -> GameView {
         move_history: game.move_history().to_vec(),
         fen: game.to_fen(),
         pgn: game.to_pgn(),
+        awaiting_clock_choice: game.awaiting_clock_choice(),
+        clock,
     }
 }
 
@@ -93,7 +116,22 @@ fn square_str(square: Square) -> String {
 #[tauri::command]
 pub fn new_game(state: State<Mutex<Game>>) -> GameView {
     let mut game = state.lock().unwrap();
-    *game = Game::new();
+    *game = Game::new_pending_clock();
+    view(&game)
+}
+
+/// Sets the time control for the game currently pending one — the frontend
+/// calls this from the time-mode picker before the board becomes
+/// interactive. `initial_ms: None` selects "No clock", which is a real,
+/// explicit choice rather than a missing one.
+#[tauri::command]
+pub fn select_time_control(
+    state: State<Mutex<Game>>,
+    initial_ms: Option<u64>,
+    increment_ms: u64,
+) -> GameView {
+    let mut game = state.lock().unwrap();
+    game.select_time_control(initial_ms, increment_ms);
     view(&game)
 }
 

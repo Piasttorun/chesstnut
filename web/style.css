@@ -229,3 +229,110 @@ body {
   padding: 0.35rem 0.75rem;
   cursor: pointer;
 }
+
+/* ---------- Clocks ---------- */
+
+.clock {
+  align-self: flex-end;
+  font-family: ui-monospace, monospace;
+  font-size: 1.5rem;
+  font-weight: 700;
+  padding: 0.35rem 1.1rem;
+  border-radius: 6px;
+  background: #eee;
+  color: #333;
+  min-width: 6rem;
+  text-align: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.clock.clock-hidden {
+  visibility: hidden;
+}
+
+.clock.clock-active {
+  background: #2f6fed;
+  color: white;
+}
+
+.clock.clock-low {
+  background: #c62828;
+  color: white;
+}
+
+/* ---------- Modals ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 50;
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal {
+  background: white;
+  border-radius: 10px;
+  padding: 1.5rem 2rem;
+  min-width: 22rem;
+  max-width: 90vw;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.modal h2 {
+  margin-top: 0;
+}
+
+#game-over-detail {
+  font-size: 1.15rem;
+  color: #333;
+}
+
+#game-over-close {
+  margin-top: 1rem;
+  font-size: 1rem;
+  padding: 0.5rem 1.25rem;
+  cursor: pointer;
+}
+
+.clock-presets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.clock-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  padding: 0.75rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fafafa;
+  cursor: pointer;
+}
+
+.clock-preset:hover {
+  background: #eef4ff;
+  border-color: #2f6fed;
+}
+
+.clock-preset-label {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.clock-preset-name {
+  font-size: 0.75rem;
+  color: #777;
+}

@@ -7,7 +7,7 @@ use chesstnut::engine::game::Game;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
-    .manage(Mutex::new(Game::new()))
+    .manage(Mutex::new(Game::new_pending_clock()))
     .invoke_handler(tauri::generate_handler![
       commands::new_game,
       commands::get_state,
@@ -15,6 +15,7 @@ pub fn run() {
       commands::make_move,
       commands::load_fen,
       commands::load_pgn,
+      commands::select_time_control,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

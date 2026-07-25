@@ -14,9 +14,39 @@ const PROMOTION_CHOICES = ["queen", "rook", "bishop", "knight"];
 
 const PGN_COLLAPSED_ROWS = 10;
 
+const TIME_PRESETS = [
+  { label: "1+0", name: "Bullet", minutes: 1, incrementSeconds: 0 },
+  { label: "2+1", name: "Bullet", minutes: 2, incrementSeconds: 1 },
+  { label: "3+0", name: "Blitz", minutes: 3, incrementSeconds: 0 },
+  { label: "3+2", name: "Blitz", minutes: 3, incrementSeconds: 2 },
+  { label: "5+0", name: "Blitz", minutes: 5, incrementSeconds: 0 },
+  { label: "5+3", name: "Blitz", minutes: 5, incrementSeconds: 3 },
+  { label: "10+0", name: "Rapid", minutes: 10, incrementSeconds: 0 },
+  { label: "10+5", name: "Rapid", minutes: 10, incrementSeconds: 5 },
+  { label: "15+10", name: "Rapid", minutes: 15, incrementSeconds: 10 },
+  { label: "30+0", name: "Classical", minutes: 30, incrementSeconds: 0 },
+  { label: "30+20", name: "Classical", minutes: 30, incrementSeconds: 20 },
+];
+
+// Polling (rather than a client-side countdown timer) keeps the displayed
+// clock and the flagging check both driven by the same source of truth —
+// Game::remaining_ms on the Rust side, computed from real elapsed time —
+// instead of two independently-drifting clocks.
+const CLOCK_POLL_INTERVAL_MS = 250;
+const CLOCK_LOW_THRESHOLD_MS = 10_000;
+
+const GAME_OVER_STATUSES = new Set([
+  "checkmate",
+  "stalemate",
+  "draw_fifty_move",
+  "draw_repetition",
+  "timeout",
+]);
+
 let selectedSquare = null;
 let legalTargets = [];
 let pgnExpanded = false;
+let clockPollHandle = null;
 
 function pieceSpriteSrc(piece) {
   const colorLetter = piece.color === "white" ? "w" : "b";
@@ -69,6 +99,8 @@ function statusText(view) {
   switch (view.status) {
     case "checkmate":
       return `Checkmate — ${other} wins`;
+    case "timeout":
+      return `Time's up — ${other} wins on time`;
     case "stalemate":
       return "Stalemate — draw";
     case "draw_fifty_move":
@@ -80,6 +112,132 @@ function statusText(view) {
     default:
       return `${turn} to move`;
   }
+}
+
+// Same result-classification logic as statusText() above, but phrased for
+// the game-over popup: a short title plus a one-line detail, rather than
+// one combined sentence.
+function gameOverText(view) {
+  const other = view.turn === "white" ? "Black" : "White";
+  switch (view.status) {
+    case "checkmate":
+      return { title: "Checkmate", detail: `${other} wins` };
+    case "timeout":
+      return { title: "Time's up", detail: `${other} wins on time` };
+    case "stalemate":
+      return { title: "Draw", detail: "Stalemate" };
+    case "draw_fifty_move":
+      return { title: "Draw", detail: "50-move rule" };
+    case "draw_repetition":
+      return { title: "Draw", detail: "Threefold repetition" };
+    default:
+      return null;
+  }
+}
+
+function formatClock(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function renderClocks(view) {
+  const whiteEl = document.getElementById("white-clock");
+  const blackEl = document.getElementById("black-clock");
+
+  if (!view.clock) {
+    whiteEl.classList.add("clock-hidden");
+    blackEl.classList.add("clock-hidden");
+    return;
+  }
+
+  whiteEl.classList.remove("clock-hidden");
+  blackEl.classList.remove("clock-hidden");
+  whiteEl.textContent = formatClock(view.clock.whiteMs);
+  blackEl.textContent = formatClock(view.clock.blackMs);
+  whiteEl.classList.toggle("clock-active", view.turn === "white");
+  blackEl.classList.toggle("clock-active", view.turn === "black");
+  whiteEl.classList.toggle("clock-low", view.clock.whiteMs < CLOCK_LOW_THRESHOLD_MS);
+  blackEl.classList.toggle("clock-low", view.clock.blackMs < CLOCK_LOW_THRESHOLD_MS);
+}
+
+function stopClockPolling() {
+  if (clockPollHandle !== null) {
+    clearInterval(clockPollHandle);
+    clockPollHandle = null;
+  }
+}
+
+// A clock only needs live polling while it's actually running: there's a
+// time control in play, and the game hasn't already ended. Re-armed on
+// every render() so a finished game (or a freshly untimed one) stops
+// polling instead of ticking forever in the background.
+function startClockPollingIfNeeded(view) {
+  stopClockPolling();
+  if (!view.clock || GAME_OVER_STATUSES.has(view.status)) return;
+
+  clockPollHandle = setInterval(async () => {
+    const latest = await invoke("get_state");
+    if (GAME_OVER_STATUSES.has(latest.status)) {
+      // The clock just ran out between ticks — do a full render so the
+      // game-over modal shows and polling stops.
+      render(latest);
+      return;
+    }
+    // Otherwise only the clock numbers moved. Rebuilding the whole board
+    // (and re-binding all 64 click listeners) four times a second made
+    // clicks feel dropped/laggy, so a normal tick only touches the clock
+    // display instead of calling the full render().
+    currentView = latest;
+    renderClocks(latest);
+  }, CLOCK_POLL_INTERVAL_MS);
+}
+
+function showGameOverModal(view) {
+  const info = gameOverText(view);
+  if (!info) return;
+  document.getElementById("game-over-title").textContent = info.title;
+  document.getElementById("game-over-detail").textContent = info.detail;
+  document.getElementById("game-over-overlay").classList.remove("hidden");
+}
+
+function hideGameOverModal() {
+  document.getElementById("game-over-overlay").classList.add("hidden");
+}
+
+function renderClockPicker() {
+  const container = document.getElementById("clock-presets");
+  container.innerHTML = "";
+
+  for (const preset of TIME_PRESETS) {
+    const button = document.createElement("button");
+    button.className = "clock-preset";
+
+    const label = document.createElement("div");
+    label.className = "clock-preset-label";
+    label.textContent = preset.label;
+
+    const name = document.createElement("div");
+    name.className = "clock-preset-name";
+    name.textContent = preset.name;
+
+    button.append(label, name);
+    button.addEventListener("click", () =>
+      chooseTimeControl(preset.minutes * 60_000, preset.incrementSeconds * 1000)
+    );
+    container.appendChild(button);
+  }
+
+  const noClock = document.createElement("button");
+  noClock.className = "clock-preset clock-preset-none";
+  noClock.textContent = "No clock";
+  noClock.addEventListener("click", () => chooseTimeControl(null, 0));
+  container.appendChild(noClock);
+}
+
+async function chooseTimeControl(initialMs, incrementMs) {
+  render(await invoke("select_time_control", { initialMs, incrementMs }));
 }
 
 // Rank/file labels never change, so they're built once up front — only the
@@ -186,6 +344,15 @@ function render(view) {
   document.getElementById("status").textContent = statusText(view);
   renderPgn(view);
   renderFen(view);
+  renderClocks(view);
+
+  document.getElementById("clock-picker-overlay").classList.toggle("hidden", !view.awaitingClockChoice);
+  if (GAME_OVER_STATUSES.has(view.status)) {
+    showGameOverModal(view);
+  } else {
+    hideGameOverModal();
+  }
+  startClockPollingIfNeeded(view);
 }
 
 async function handleSquareClick(squareName, view) {
@@ -224,6 +391,8 @@ async function handleSquareClick(squareName, view) {
 async function startNewGame() {
   selectedSquare = null;
   legalTargets = [];
+  pgnExpanded = false;
+  hideGameOverModal();
   render(await invoke("new_game"));
 }
 
@@ -265,7 +434,9 @@ async function importPgn() {
 
 document.addEventListener("DOMContentLoaded", () => {
   renderLabels();
+  renderClockPicker();
   document.getElementById("new-game").addEventListener("click", startNewGame);
+  document.getElementById("game-over-close").addEventListener("click", startNewGame);
 
   // Clicking the toggle expands to full history; clicking anywhere else in
   // the panel while expanded collapses it back to the last

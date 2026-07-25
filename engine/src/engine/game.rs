@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::engine::board::{Board, Color, Piece, PieceKind, Square};
 use crate::engine::fen;
 use crate::engine::moves::Move;
@@ -12,6 +14,22 @@ pub enum GameStatus {
     Stalemate,
     DrawByFiftyMoveRule,
     DrawByRepetition,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimeControl {
+    initial_ms: u64,
+    increment_ms: u64,
+}
+
+// "No clock" is a real, deliberate choice, so it's a variant here rather
+// than represented as `Option::None` — whether a choice has been made *at
+// all* is tracked separately by `Game::awaiting_clock_choice`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockMode {
+    None,
+    Timed(TimeControl),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,11 +72,36 @@ pub struct Game {
     // from_fen() can start a game already partway through, where that
     // derivation would be wrong.
     fullmove_number: u32,
+    // Blocks `make_move` until a time control has been chosen — see
+    // `new_pending_clock`/`select_time_control`. `Game::new()` and friends
+    // leave this `false` (clock defaults to `ClockMode::None`) so existing
+    // callers — tests, FEN/PGN loading — behave exactly as before.
+    awaiting_clock_choice: bool,
+    clock_mode: ClockMode,
+    white_remaining_ms: u64,
+    black_remaining_ms: u64,
+    // Wall-clock start of the side-to-move's current turn. `None` whenever
+    // the clock isn't running (untimed game, or no choice made yet).
+    turn_started_at: Option<Instant>,
+    // Per-move clock reading parsed from a PGN's `[%clk ...]` comments during
+    // import, parallel to `move_history` by index. Empty for games that
+    // weren't imported from an annotated PGN. Store-only for now — nothing
+    // reads this yet beyond `move_clock_log()` itself.
+    move_clock_log: Vec<Option<u64>>,
 }
 
 impl Game {
     pub fn new() -> Self {
         Game::from_board(Board::starting_position(), Color::White)
+    }
+
+    /// Like `new()`, but blocks `make_move` until `select_time_control` is
+    /// called — the "you must pick a time control before the game can
+    /// start" flow the desktop app uses for its New Game button.
+    pub fn new_pending_clock() -> Self {
+        let mut game = Game::new();
+        game.awaiting_clock_choice = true;
+        game
     }
 
     pub fn from_board(board: Board, turn: Color) -> Self {
@@ -71,6 +114,12 @@ impl Game {
             history: Vec::new(),
             move_history: Vec::new(),
             fullmove_number: 1,
+            awaiting_clock_choice: false,
+            clock_mode: ClockMode::None,
+            white_remaining_ms: 0,
+            black_remaining_ms: 0,
+            turn_started_at: None,
+            move_clock_log: Vec::new(),
         };
         game.history.push((game.board, game.turn));
         game
@@ -97,6 +146,12 @@ impl Game {
             history: Vec::new(),
             move_history: Vec::new(),
             fullmove_number: parsed.fullmove_number,
+            awaiting_clock_choice: false,
+            clock_mode: ClockMode::None,
+            white_remaining_ms: 0,
+            black_remaining_ms: 0,
+            turn_started_at: None,
+            move_clock_log: Vec::new(),
         };
         game.history.push((game.board, game.turn));
         Ok(game)
@@ -110,9 +165,14 @@ impl Game {
     /// fails the whole import; there's no partial-game recovery.
     pub fn import_pgn(text: &str) -> Result<Self, String> {
         let mut game = Game::new();
-        for token in pgn::movetext_tokens(text) {
-            game.apply_san(&token)?;
+        let tokens = pgn::movetext_tokens_with_clock(text);
+        for (token, _clock_ms) in &tokens {
+            game.apply_san(token)?;
         }
+        // Only assigned once every token has replayed successfully — a
+        // failed import returns Err above and this line never runs, so
+        // move_clock_log never ends up mismatched with move_history.
+        game.move_clock_log = tokens.into_iter().map(|(_, clock_ms)| clock_ms).collect();
         Ok(game)
     }
 
@@ -146,6 +206,70 @@ impl Game {
 
     pub fn move_history(&self) -> &[String] {
         &self.move_history
+    }
+
+    /// Per-move clock reading parsed from a `[%clk ...]`-annotated PGN
+    /// import, parallel to `move_history` by index (`None` where a move had
+    /// no clock comment). Empty for any game not loaded via `import_pgn`.
+    pub fn move_clock_log(&self) -> &[Option<u64>] {
+        &self.move_clock_log
+    }
+
+    pub fn awaiting_clock_choice(&self) -> bool {
+        self.awaiting_clock_choice
+    }
+
+    pub fn is_clock_enabled(&self) -> bool {
+        matches!(self.clock_mode, ClockMode::Timed(_))
+    }
+
+    pub fn increment_ms(&self) -> Option<u64> {
+        match self.clock_mode {
+            ClockMode::Timed(control) => Some(control.increment_ms),
+            ClockMode::None => None,
+        }
+    }
+
+    /// Sets the game's time control and unblocks `make_move`. `None` means
+    /// "no clock" — a deliberate, explicit choice, not a default. Intended
+    /// to be called once, before the first move; calling it again just
+    /// restarts the clock from scratch, since there's no mid-game
+    /// time-control-change flow to support.
+    pub fn select_time_control(&mut self, initial_ms: Option<u64>, increment_ms: u64) {
+        self.clock_mode = match initial_ms {
+            Some(initial_ms) => {
+                let control = TimeControl { initial_ms, increment_ms };
+                self.white_remaining_ms = control.initial_ms;
+                self.black_remaining_ms = control.initial_ms;
+                self.turn_started_at = Some(Instant::now());
+                ClockMode::Timed(control)
+            }
+            None => {
+                self.turn_started_at = None;
+                ClockMode::None
+            }
+        };
+        self.awaiting_clock_choice = false;
+    }
+
+    /// Live remaining time for `color`, accounting for elapsed real time if
+    /// it's currently that color's turn. `None` when there's no clock
+    /// (untimed game, or no time control chosen yet).
+    pub fn remaining_ms(&self, color: Color) -> Option<u64> {
+        if !self.is_clock_enabled() {
+            return None;
+        }
+        let stored = match color {
+            Color::White => self.white_remaining_ms,
+            Color::Black => self.black_remaining_ms,
+        };
+        if color != self.turn {
+            return Some(stored);
+        }
+        match self.turn_started_at {
+            Some(started_at) => Some(stored.saturating_sub(started_at.elapsed().as_millis() as u64)),
+            None => Some(stored),
+        }
     }
 
     pub fn to_fen(&self) -> String {
@@ -231,6 +355,14 @@ impl Game {
     }
 
     pub fn status(&self) -> GameStatus {
+        // Flagging takes priority over everything else — even a checkmate
+        // sitting on the board doesn't matter if the clock already hit zero
+        // first. `remaining_ms` clamps at zero via saturating_sub, so
+        // `== Some(0)` reliably means "time's up", not "very low".
+        if self.remaining_ms(self.turn) == Some(0) {
+            return GameStatus::Timeout;
+        }
+
         let in_check = rules::is_in_check(&self.board, self.turn);
         let has_moves = !self.all_legal_moves(self.turn).is_empty();
 
@@ -267,10 +399,14 @@ impl Game {
                 | GameStatus::Stalemate
                 | GameStatus::DrawByFiftyMoveRule
                 | GameStatus::DrawByRepetition
+                | GameStatus::Timeout
         )
     }
 
     pub fn make_move(&mut self, mv: Move) -> Result<(), IllegalMove> {
+        if self.awaiting_clock_choice {
+            return Err(IllegalMove);
+        }
         if self.is_game_over() {
             return Err(IllegalMove);
         }
@@ -301,6 +437,22 @@ impl Game {
 
         self.board = rules::apply_move(&self.board, mv);
         self.turn = self.turn.opponent();
+
+        // Charge the mover for the time they just spent thinking, then
+        // credit the increment (if any) and restart the clock for whoever's
+        // turn it is now. `piece.color` — captured before `self.turn`
+        // flipped above — is the side that just moved.
+        if let ClockMode::Timed(control) = self.clock_mode {
+            let started_at = self.turn_started_at.unwrap_or_else(Instant::now);
+            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+            let mover_remaining = match piece.color {
+                Color::White => &mut self.white_remaining_ms,
+                Color::Black => &mut self.black_remaining_ms,
+            };
+            *mover_remaining = mover_remaining.saturating_sub(elapsed_ms) + control.increment_ms;
+            self.turn_started_at = Some(Instant::now());
+        }
+
         self.halfmove_clock = if is_pawn_move || is_capture {
             0
         } else {

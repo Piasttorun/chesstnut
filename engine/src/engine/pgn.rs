@@ -73,30 +73,37 @@ pub(crate) fn movetext(moves: &[String]) -> String {
     out
 }
 
-/// Extracts the move tokens from PGN text — strips `[Tag "value"]` header
-/// lines, `{comments}` and `(variations)` (including nested ones — a
-/// variation can itself branch again), NAG codes (`$1`), move-number
-/// prefixes ("1.", "23...", including when glued directly to the move like
-/// "1.e4"), the trailing result token, and any "+"/"#"/"!"/"?" suffix
-/// (annotation glyphs and check/mate suffixes carry no information a
-/// legal-move lookup needs — see `apply_san` in game.rs, which matches
-/// against SAN computed with is_check/is_checkmate forced to false). Real
-/// exports (e.g. Lichess) routinely include comments/variations — someone
-/// who took back a move during analysis gets the abandoned line preserved
-/// as a `(...)` branch — so these are common, valid PGN, not malformed
-/// input.
-pub(crate) fn movetext_tokens(text: &str) -> Vec<String> {
-    strip_annotations(&strip_headers(text))
-        .split_whitespace()
-        .filter_map(|raw| {
-            let token = strip_move_number_prefix(raw);
-            if token.is_empty() || is_result_token(token) || token.starts_with('$') {
-                None
-            } else {
-                Some(token.trim_end_matches(['+', '#', '!', '?']).to_string())
-            }
-        })
-        .collect()
+/// Extracts the move tokens from PGN text, paired with a per-move clock
+/// reading when a Lichess-style `{[%clk h:mm:ss]}` comment immediately
+/// follows that move (`None` otherwise). Strips `[Tag "value"]` header
+/// lines, `(variations)` (including nested ones — a variation can itself
+/// branch again), NAG codes (`$1`), move-number prefixes ("1.", "23...",
+/// including when glued directly to the move like "1.e4"), the trailing
+/// result token, and any "+"/"#"/"!"/"?" suffix (annotation glyphs and
+/// check/mate suffixes carry no information a legal-move lookup needs — see
+/// `apply_san` in game.rs, which matches against SAN computed with
+/// is_check/is_checkmate forced to false). Real exports (e.g. Lichess)
+/// routinely include comments/variations — someone who took back a move
+/// during analysis gets the abandoned line preserved as a `(...)` branch —
+/// so these are common, valid PGN, not malformed input.
+pub(crate) fn movetext_tokens_with_clock(text: &str) -> Vec<(String, Option<u64>)> {
+    let raw_tokens = scan(&strip_variations(&strip_headers(text)));
+
+    let mut result = Vec::new();
+    for (index, raw) in raw_tokens.iter().enumerate() {
+        let RawToken::Word(word) = raw else { continue };
+        let token = strip_move_number_prefix(word);
+        if token.is_empty() || is_result_token(token) || token.starts_with('$') {
+            continue;
+        }
+        let clean = token.trim_end_matches(['+', '#', '!', '?']).to_string();
+        let clock_ms = match raw_tokens.get(index + 1) {
+            Some(RawToken::Comment(comment)) => parse_clk_comment(comment),
+            _ => None,
+        };
+        result.push((clean, clock_ms));
+    }
+    result
 }
 
 fn strip_headers(text: &str) -> String {
@@ -109,26 +116,90 @@ fn strip_headers(text: &str) -> String {
         .join(" ")
 }
 
-/// Drops everything inside `{...}` or `(...)`, tracking each bracket kind's
-/// nesting depth independently so a variation-within-a-variation is dropped
-/// in full rather than leaving its tail exposed once the first `)` is hit.
-fn strip_annotations(text: &str) -> String {
+/// Drops everything inside `(...)`, tracking nesting depth so a
+/// variation-within-a-variation is dropped in full rather than leaving its
+/// tail exposed once the first `)` is hit. `{...}` comments are left alone
+/// here — `scan` below is what pulls those out, since a comment right after
+/// a move (e.g. a `[%clk ...]` reading) needs to stay associated with it.
+fn strip_variations(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut paren_depth: u32 = 0;
-    let mut brace_depth: u32 = 0;
+    let mut depth: u32 = 0;
 
     for ch in text.chars() {
         match ch {
-            '(' => paren_depth += 1,
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '{' => brace_depth += 1,
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            _ if paren_depth == 0 && brace_depth == 0 => out.push(ch),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
             _ => {}
         }
     }
 
     out
+}
+
+enum RawToken {
+    Word(String),
+    Comment(String),
+}
+
+/// Splits whitespace-separated words apart from `{...}` comments, keeping a
+/// comment as one token (it may itself contain spaces, e.g.
+/// `{[%clk 0:05:00]}`) rather than letting it get shredded by a plain
+/// `split_whitespace`.
+fn scan(text: &str) -> Vec<RawToken> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch == '{' {
+            if !word.is_empty() {
+                tokens.push(RawToken::Word(std::mem::take(&mut word)));
+            }
+            chars.next();
+            let mut comment = String::new();
+            for c in chars.by_ref() {
+                if c == '}' {
+                    break;
+                }
+                comment.push(c);
+            }
+            tokens.push(RawToken::Comment(comment));
+        } else if ch.is_whitespace() {
+            if !word.is_empty() {
+                tokens.push(RawToken::Word(std::mem::take(&mut word)));
+            }
+            chars.next();
+        } else {
+            word.push(ch);
+            chars.next();
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(RawToken::Word(word));
+    }
+
+    tokens
+}
+
+/// Pulls a `[%clk h:mm:ss]` (or `m:ss`) reading out of a comment body and
+/// converts it to milliseconds. Any other comment content, or a malformed
+/// clock reading, just yields `None` — this is store-only metadata, not
+/// something the import can fail over.
+fn parse_clk_comment(comment: &str) -> Option<u64> {
+    let after_tag = comment[comment.find("%clk")? + 4..].trim_start();
+    let time_str = &after_tag[..after_tag.find(']').unwrap_or(after_tag.len())];
+    parse_clock_duration(time_str.trim())
+}
+
+fn parse_clock_duration(text: &str) -> Option<u64> {
+    let parts: Vec<&str> = text.split(':').collect();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [h, m, s] => (h.parse::<u64>().ok()?, m.parse::<u64>().ok()?, s.parse::<f64>().ok()?),
+        [m, s] => (0, m.parse::<u64>().ok()?, s.parse::<f64>().ok()?),
+        _ => return None,
+    };
+    Some(hours * 3_600_000 + minutes * 60_000 + (seconds * 1000.0).round() as u64)
 }
 
 fn strip_move_number_prefix(token: &str) -> &str {
