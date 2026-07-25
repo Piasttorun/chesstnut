@@ -30,7 +30,7 @@ mod search;
 
 pub use eval::evaluate;
 pub use random::RandomEngine;
-pub use search::search;
+pub use search::{search, search_cancellable, Cancellation};
 
 use crate::engine::game::Game;
 use crate::engine::moves::Move;

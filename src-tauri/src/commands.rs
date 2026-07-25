@@ -1,9 +1,18 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chesstnut::engine::board::{Color, PieceKind, Square};
 use chesstnut::engine::game::{Game, GameStatus};
 use serde::Serialize;
 use tauri::State;
+
+/// Called by every command that actually changes the position, so a
+/// still-running `analyze` search (see that command) can notice the
+/// position it's analyzing is stale and stop early rather than run to
+/// completion for a result the frontend will just discard.
+fn bump_generation(generation: &AtomicU64) {
+    generation.fetch_add(1, Ordering::Relaxed);
+}
 
 #[derive(Serialize)]
 pub struct PieceDto {
@@ -154,19 +163,34 @@ fn square_str(square: Square) -> String {
 /// command still runs *somewhere*, and a multi-hundred-millisecond
 /// CPU-bound search sharing a thread with IPC dispatch is exactly what
 /// made move input feel laggy before this existed.
+///
+/// Also wired up to `generation` so that if the player moves on before this
+/// search finishes, it notices and stops early (see
+/// `chesstnut::ai::Cancellation`) instead of continuing to burn CPU — and
+/// therefore compete with the *next* click for scheduling time — on a
+/// result the frontend has already decided to discard.
 #[tauri::command]
-pub async fn analyze(state: State<'_, Mutex<Game>>, depth: u32) -> Result<ScoreDto, String> {
+pub async fn analyze(
+    state: State<'_, Mutex<Game>>,
+    generation: State<'_, Arc<AtomicU64>>,
+    depth: u32,
+) -> Result<ScoreDto, String> {
     let game = state.lock().unwrap().clone();
-    let score = tauri::async_runtime::spawn_blocking(move || chesstnut::ai::search(&game, depth))
-        .await
-        .map_err(|err| err.to_string())?;
+    let expected_generation = generation.load(Ordering::Relaxed);
+    let cancel = chesstnut::ai::Cancellation::tracking(generation.inner().clone(), expected_generation);
+    let score = tauri::async_runtime::spawn_blocking(move || {
+        chesstnut::ai::search_cancellable(&game, depth, &cancel)
+    })
+    .await
+    .map_err(|err| err.to_string())?;
     Ok(score.into())
 }
 
 #[tauri::command]
-pub fn new_game(state: State<Mutex<Game>>) -> GameView {
+pub fn new_game(state: State<Mutex<Game>>, generation: State<Arc<AtomicU64>>) -> GameView {
     let mut game = state.lock().unwrap();
     *game = Game::new_pending_clock();
+    bump_generation(&generation);
     view(&game)
 }
 
@@ -177,11 +201,13 @@ pub fn new_game(state: State<Mutex<Game>>) -> GameView {
 #[tauri::command]
 pub fn select_time_control(
     state: State<Mutex<Game>>,
+    generation: State<Arc<AtomicU64>>,
     initial_ms: Option<u64>,
     increment_ms: u64,
 ) -> GameView {
     let mut game = state.lock().unwrap();
     game.select_time_control(initial_ms, increment_ms);
+    bump_generation(&generation);
     view(&game)
 }
 
@@ -232,6 +258,7 @@ fn parse_promotion(text: &str) -> Result<PieceKind, String> {
 #[tauri::command]
 pub fn make_move(
     state: State<Mutex<Game>>,
+    generation: State<Arc<AtomicU64>>,
     from: String,
     to: String,
     promotion: Option<String>,
@@ -257,26 +284,38 @@ pub fn make_move(
     };
 
     game.make_move(mv).map_err(|_| "illegal move".to_string())?;
+    bump_generation(&generation);
     Ok(view(&game))
 }
 
 #[tauri::command]
-pub fn resign(state: State<Mutex<Game>>) -> Result<GameView, String> {
+pub fn resign(state: State<Mutex<Game>>, generation: State<Arc<AtomicU64>>) -> Result<GameView, String> {
     let mut game = state.lock().unwrap();
     game.resign().map_err(|_| "the game is already over".to_string())?;
+    bump_generation(&generation);
     Ok(view(&game))
 }
 
 #[tauri::command]
-pub fn load_fen(state: State<Mutex<Game>>, fen: String) -> Result<GameView, String> {
+pub fn load_fen(
+    state: State<Mutex<Game>>,
+    generation: State<Arc<AtomicU64>>,
+    fen: String,
+) -> Result<GameView, String> {
     let mut game = state.lock().unwrap();
     *game = Game::from_fen(&fen)?;
+    bump_generation(&generation);
     Ok(view(&game))
 }
 
 #[tauri::command]
-pub fn load_pgn(state: State<Mutex<Game>>, pgn: String) -> Result<GameView, String> {
+pub fn load_pgn(
+    state: State<Mutex<Game>>,
+    generation: State<Arc<AtomicU64>>,
+    pgn: String,
+) -> Result<GameView, String> {
     let mut game = state.lock().unwrap();
     *game = Game::import_pgn(&pgn)?;
+    bump_generation(&generation);
     Ok(view(&game))
 }

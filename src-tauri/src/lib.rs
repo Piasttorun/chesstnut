@@ -1,6 +1,7 @@
 mod commands;
 
-use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
 use chesstnut::engine::game::Game;
 
@@ -8,6 +9,11 @@ use chesstnut::engine::game::Game;
 pub fn run() {
   tauri::Builder::default()
     .manage(Mutex::new(Game::new_pending_clock()))
+    // Bumped by every command that actually changes the position (see
+    // commands::bump_generation) so `analyze` can tell a still-running
+    // search that the position it's analyzing is stale and stop early —
+    // see chesstnut::ai::Cancellation.
+    .manage(Arc::new(AtomicU64::new(0)))
     .invoke_handler(tauri::generate_handler![
       commands::new_game,
       commands::get_state,

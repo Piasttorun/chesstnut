@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use crate::engine::board::Color;
 use crate::engine::game::Game;
 use crate::engine::moves::Move;
@@ -5,6 +8,44 @@ use crate::engine::rules;
 
 use super::eval::piece_value;
 use super::{evaluate, Score};
+
+/// Lets a search notice mid-flight that the position it's analyzing is no
+/// longer the current one — the player made another move (or started a new
+/// game, loaded a FEN, ...) while a slow, deep search from the *previous*
+/// position was still running — and stop early instead of burning CPU on a
+/// result the frontend already knows to discard. Cutting thread count
+/// (see `best_root_score`) only limits how much of the machine one search
+/// can claim; it doesn't stop a stale one from running to completion and
+/// competing with the next click for however long that takes. Cloneable
+/// and cheap to pass around — it's just an `Arc` clone plus one integer.
+#[derive(Clone)]
+pub struct Cancellation {
+    tracking: Option<(Arc<AtomicU64>, u64)>,
+}
+
+impl Cancellation {
+    /// A search that never gets cancelled — what the plain [`search`]
+    /// entry point (used directly by tests, and anywhere else that isn't
+    /// wiring this up to a live position) passes.
+    pub fn none() -> Self {
+        Cancellation { tracking: None }
+    }
+
+    /// `generation` is a counter the caller bumps every time the tracked
+    /// position actually changes; `expected` is its value at the moment
+    /// this search started. Once they no longer match, the position has
+    /// moved on.
+    pub fn tracking(generation: Arc<AtomicU64>, expected: u64) -> Self {
+        Cancellation { tracking: Some((generation, expected)) }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        match &self.tracking {
+            Some((generation, expected)) => generation.load(Ordering::Relaxed) != *expected,
+            None => false,
+        }
+    }
+}
 
 /// Large enough that no plausible material evaluation ever gets close to
 /// it, so "the returned value is within a small distance of this" reliably
@@ -30,6 +71,14 @@ const MATE_VALUE: i32 = 1_000_000;
 /// be parallelized without needing to share alpha-beta state between
 /// threads.
 pub fn search(game: &Game, depth: u32) -> Score {
+    search_cancellable(game, depth, &Cancellation::none())
+}
+
+/// Same as [`search`], but stops early — returning whatever partial result
+/// it has, which the caller is expected to discard rather than display —
+/// once `cancel` reports the position it was analyzing is stale. See
+/// [`Cancellation`].
+pub fn search_cancellable(game: &Game, depth: u32, cancel: &Cancellation) -> Score {
     if game.awaiting_clock_choice() {
         // Nothing to analyze before the game has actually started — and
         // `make_move` rejects everything in this state regardless of what
@@ -47,7 +96,7 @@ pub fn search(game: &Game, depth: u32) -> Score {
             0
         }
     } else {
-        best_root_score(game, &moves, depth)
+        best_root_score(game, &moves, depth, cancel)
     };
 
     let white_perspective = match game.turn() {
@@ -63,17 +112,24 @@ pub fn search(game: &Game, depth: u32) -> Score {
 /// happen normally *within* each thread's own subtree, they just aren't
 /// shared *across* threads, which is what makes this safe to parallelize
 /// without synchronization beyond collecting the results at the end.
-fn best_root_score(game: &Game, moves: &[Move], depth: i32) -> i32 {
+fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellation) -> i32 {
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
-        // Leave at least one core free for the OS, the webview, and Tauri's
-        // own IPC handling — using every last core turns a search into a
-        // full CPU-saturation event with nothing left over to process a
-        // click promptly, which is exactly the "moves feel laggy" bug this
-        // is fixing, not a hypothetical one.
-        .saturating_sub(1)
+        // Using only *one* fewer core than available (the previous rule
+        // here) still starves everything else under WSLg specifically:
+        // its software rendering path (no real GPU is available inside
+        // WSL, so it falls back to llvmpipe) is itself heavily
+        // multi-threaded and competing for the same cores as the search.
+        // A third of the cores, capped at a small absolute number, leaves
+        // genuine headroom for the OS, the webview/compositor, and Tauri's
+        // IPC dispatch regardless of how large this machine's core count
+        // is — deeper search from here on should come from better pruning
+        // (transposition tables, iterative deepening) rather than from
+        // claiming more threads, which just reopens this exact problem.
+        .div_ceil(3)
         .max(1)
+        .min(6)
         .min(moves.len());
     let chunk_size = moves.len().div_ceil(thread_count);
 
@@ -85,6 +141,16 @@ fn best_root_score(game: &Game, moves: &[Move], depth: i32) -> i32 {
                     chunk
                         .iter()
                         .filter_map(|&mv| {
+                            // Checked before each root move rather than
+                            // inside negamax's recursion — cheap (one
+                            // relaxed atomic load) and catches the common
+                            // case (the position moved on while several
+                            // root moves were still left to explore)
+                            // without threading a check through every
+                            // recursive call.
+                            if cancel.is_cancelled() {
+                                return None;
+                            }
                             let mut next = game.clone();
                             next.make_move(mv).ok()?;
                             Some(-negamax(&next, depth - 1, 1, -(MATE_VALUE + 1), MATE_VALUE + 1))
