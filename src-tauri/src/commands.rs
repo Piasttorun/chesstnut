@@ -30,6 +30,10 @@ pub struct GameView {
     pgn: String,
     awaiting_clock_choice: bool,
     clock: Option<ClockDto>,
+    // Centipawns from White's perspective — positive favors White. Always
+    // present regardless of clock/AI settings, since it's a pure function
+    // of the board (see chesstnut::ai::evaluate), not tied to either.
+    score: i32,
 }
 
 fn kind_str(kind: PieceKind) -> &'static str {
@@ -85,6 +89,10 @@ fn view(game: &Game) -> GameView {
         None
     };
 
+    let chesstnut::ai::Score::Centipawns(score) = chesstnut::ai::evaluate(game.board()) else {
+        unreachable!("evaluate() only ever produces Centipawns for now")
+    };
+
     GameView {
         board,
         turn: color_str(game.turn()),
@@ -94,6 +102,7 @@ fn view(game: &Game) -> GameView {
         pgn: game.to_pgn(),
         awaiting_clock_choice: game.awaiting_clock_choice(),
         clock,
+        score,
     }
 }
 

@@ -168,6 +168,42 @@ function renderClocks(view) {
   blackEl.classList.toggle("clock-low", view.clock.blackMs < CLOCK_LOW_THRESHOLD_MS);
 }
 
+// Most games live within a pawn or so of material, so that's where the bar
+// should be most readable — tanh gives a curve that's close to linear (and
+// steep) near zero, then flattens out fast so lopsided positions don't
+// pin to one extreme the moment someone's up a queen. Calibrated so a
+// 1-pawn (100cp) edge moves the bar exactly a third of the way from center
+// toward the (unreached) edge: solving tanh(100 / S) = 1/3 for S.
+const EVAL_BAR_SENSITIVITY_CP = 100 / Math.atanh(1 / 3);
+// However lopsided the material is, the trailing side keeps at least this
+// much of the bar — full 0%/100% is reserved for an actual checkmate below,
+// not just a big material swing.
+const EVAL_BAR_FLOOR_PERCENT = 10;
+
+function whitePercentFor(view) {
+  if (view.status === "checkmate") {
+    // The side to move has no moves and just got mated — this is the only
+    // case that empties the bar completely.
+    return view.turn === "white" ? 0 : 100;
+  }
+  const t = Math.tanh(view.score / EVAL_BAR_SENSITIVITY_CP); // -1..1
+  return 50 + t * (50 - EVAL_BAR_FLOOR_PERCENT);
+}
+
+function renderEvalBar(view) {
+  const column = document.getElementById("eval-bar-column");
+  const showEvalBar = document.getElementById("eval-bar-checkbox").checked;
+  column.classList.toggle("hidden", !showEvalBar);
+  if (!showEvalBar) return;
+
+  const whitePercent = whitePercentFor(view);
+  document.getElementById("eval-bar-white").style.height = `${whitePercent}%`;
+  document.getElementById("eval-bar-black").style.height = `${100 - whitePercent}%`;
+
+  const pawns = (view.score / 100).toFixed(1);
+  document.getElementById("eval-bar-text").textContent = view.score >= 0 ? `+${pawns}` : pawns;
+}
+
 function stopClockPolling() {
   if (clockPollHandle !== null) {
     clearInterval(clockPollHandle);
@@ -351,6 +387,7 @@ function render(view) {
   renderPgn(view);
   renderFen(view);
   renderClocks(view);
+  renderEvalBar(view);
 
   document.getElementById("clock-picker-overlay").classList.toggle("hidden", !view.awaitingClockChoice);
   if (GAME_OVER_STATUSES.has(view.status)) {
@@ -451,6 +488,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("new-game").addEventListener("click", startNewGame);
   document.getElementById("resign").addEventListener("click", resign);
   document.getElementById("game-over-close").addEventListener("click", startNewGame);
+  document.getElementById("eval-bar-checkbox").addEventListener("change", () => renderEvalBar(currentView));
 
   // Clicking the toggle expands to full history; clicking anywhere else in
   // the panel while expanded collapses it back to the last
