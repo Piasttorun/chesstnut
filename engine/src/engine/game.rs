@@ -1,5 +1,7 @@
 use crate::engine::board::{Board, Color, Piece, PieceKind, Square};
+use crate::engine::fen;
 use crate::engine::moves::Move;
+use crate::engine::pgn;
 use crate::engine::rules;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,13 @@ pub struct Game {
     // this board size — see the "does reconstructing the board matter"
     // discussion from earlier: copying/comparing a 64-square board is cheap.
     history: Vec<(Board, Color)>,
+    // SAN strings in play order, one per move, for PGN export.
+    move_history: Vec<String>,
+    // FEN's move counter: starts at 1, increments after Black replies.
+    // Stored explicitly rather than derived from history.len() because
+    // from_fen() can start a game already partway through, where that
+    // derivation would be wrong.
+    fullmove_number: u32,
 }
 
 impl Game {
@@ -60,9 +69,71 @@ impl Game {
             en_passant_target: None,
             halfmove_clock: 0,
             history: Vec::new(),
+            move_history: Vec::new(),
+            fullmove_number: 1,
         };
         game.history.push((game.board, game.turn));
         game
+    }
+
+    /// Loads a position from a FEN string. Only syntax is validated (right
+    /// number of fields, legal characters, ranks summing to 8 squares) —
+    /// not chess legality, so e.g. a FEN with two white kings will load
+    /// without complaint. Malformed input fails with a plain error string;
+    /// there's no attempt to partially recover.
+    pub fn from_fen(text: &str) -> Result<Self, String> {
+        let parsed = fen::parse(text)?;
+        let mut game = Game {
+            board: parsed.board,
+            turn: parsed.turn,
+            castling_rights: CastlingRights {
+                white_kingside: parsed.white_kingside,
+                white_queenside: parsed.white_queenside,
+                black_kingside: parsed.black_kingside,
+                black_queenside: parsed.black_queenside,
+            },
+            en_passant_target: parsed.en_passant_target,
+            halfmove_clock: parsed.halfmove_clock,
+            history: Vec::new(),
+            move_history: Vec::new(),
+            fullmove_number: parsed.fullmove_number,
+        };
+        game.history.push((game.board, game.turn));
+        Ok(game)
+    }
+
+    /// Replays a game from PGN movetext, always starting from the standard
+    /// starting position (a `[FEN ...]` header for non-standard starts
+    /// isn't supported). Each token is matched against that position's
+    /// actual legal moves rather than hand-parsed — see pgn::movetext_tokens
+    /// and apply_san below. The first token that doesn't match a legal move
+    /// fails the whole import; there's no partial-game recovery.
+    pub fn import_pgn(text: &str) -> Result<Self, String> {
+        let mut game = Game::new();
+        for token in pgn::movetext_tokens(text) {
+            game.apply_san(&token)?;
+        }
+        Ok(game)
+    }
+
+    fn apply_san(&mut self, token: &str) -> Result<(), String> {
+        let candidates = self.all_legal_moves(self.turn);
+        let board_before = self.board;
+        let mover_color = self.turn;
+
+        let matches: Vec<Move> = candidates
+            .iter()
+            .copied()
+            .filter(|&mv| pgn::san(&board_before, mover_color, &candidates, mv, false, false) == token)
+            .collect();
+
+        match matches.as_slice() {
+            [mv] => self
+                .make_move(*mv)
+                .map_err(|_| format!("move '{token}' matched a legal move but was rejected")),
+            [] => Err(format!("no legal move matches '{token}'")),
+            _ => Err(format!("move '{token}' is ambiguous")),
+        }
     }
 
     pub fn board(&self) -> &Board {
@@ -71,6 +142,37 @@ impl Game {
 
     pub fn turn(&self) -> Color {
         self.turn
+    }
+
+    pub fn move_history(&self) -> &[String] {
+        &self.move_history
+    }
+
+    pub fn to_fen(&self) -> String {
+        fen::format(
+            &self.board,
+            self.turn,
+            self.castling_rights.white_kingside,
+            self.castling_rights.white_queenside,
+            self.castling_rights.black_kingside,
+            self.castling_rights.black_queenside,
+            self.en_passant_target,
+            self.halfmove_clock,
+            self.fullmove_number,
+        )
+    }
+
+    pub fn to_pgn(&self) -> String {
+        // Placeholder header values — this is a local pass-and-play game
+        // with no event/player metadata to fill in for real.
+        let headers = "[Event \"Casual Game\"]\n\
+             [Site \"Chesstnut\"]\n\
+             [Date \"????.??.??\"]\n\
+             [Round \"?\"]\n\
+             [White \"?\"]\n\
+             [Black \"?\"]\n\
+             [Result \"*\"]\n\n";
+        format!("{headers}{}", pgn::movetext(&self.move_history))
     }
 
     /// All legal moves for the piece on `from`, including castling and en
@@ -188,6 +290,12 @@ impl Game {
         let is_capture = self.board.get(mv.to).is_some()
             || (is_pawn_move && mv.from.file != mv.to.file);
 
+        // SAN needs the position *before* the move (to know what's being
+        // captured and which same-kind pieces could also reach `mv.to`, for
+        // disambiguation) — both captured here before anything mutates.
+        let board_before = self.board;
+        let legal_moves_before = self.all_legal_moves(self.turn);
+
         self.update_castling_rights(piece, mv);
         self.en_passant_target = en_passant_target_after(piece, mv);
 
@@ -198,7 +306,22 @@ impl Game {
         } else {
             self.halfmove_clock + 1
         };
+        if piece.color == Color::Black {
+            self.fullmove_number += 1;
+        }
         self.history.push((self.board, self.turn));
+
+        let status_after = self.status();
+        let is_check = matches!(status_after, GameStatus::Check | GameStatus::Checkmate);
+        let is_checkmate = matches!(status_after, GameStatus::Checkmate);
+        self.move_history.push(pgn::san(
+            &board_before,
+            piece.color,
+            &legal_moves_before,
+            mv,
+            is_check,
+            is_checkmate,
+        ));
 
         Ok(())
     }

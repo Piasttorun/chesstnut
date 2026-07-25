@@ -12,10 +12,14 @@ pub struct PieceDto {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GameView {
     board: Vec<Option<PieceDto>>,
     turn: &'static str,
     status: &'static str,
+    move_history: Vec<String>,
+    fen: String,
+    pgn: String,
 }
 
 fn kind_str(kind: PieceKind) -> &'static str {
@@ -63,6 +67,9 @@ fn view(game: &Game) -> GameView {
         board,
         turn: color_str(game.turn()),
         status: status_str(game.status()),
+        move_history: game.move_history().to_vec(),
+        fen: game.to_fen(),
+        pgn: game.to_pgn(),
     }
 }
 
@@ -162,5 +169,19 @@ pub fn make_move(
     };
 
     game.make_move(mv).map_err(|_| "illegal move".to_string())?;
+    Ok(view(&game))
+}
+
+#[tauri::command]
+pub fn load_fen(state: State<Mutex<Game>>, fen: String) -> Result<GameView, String> {
+    let mut game = state.lock().unwrap();
+    *game = Game::from_fen(&fen)?;
+    Ok(view(&game))
+}
+
+#[tauri::command]
+pub fn load_pgn(state: State<Mutex<Game>>, pgn: String) -> Result<GameView, String> {
+    let mut game = state.lock().unwrap();
+    *game = Game::import_pgn(&pgn)?;
     Ok(view(&game))
 }

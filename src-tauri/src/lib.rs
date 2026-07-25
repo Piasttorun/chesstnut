@@ -13,6 +13,8 @@ pub fn run() {
       commands::get_state,
       commands::legal_moves,
       commands::make_move,
+      commands::load_fen,
+      commands::load_pgn,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

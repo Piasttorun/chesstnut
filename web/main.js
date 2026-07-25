@@ -12,8 +12,11 @@ const PIECE_LETTERS = {
 
 const PROMOTION_CHOICES = ["queen", "rook", "bishop", "knight"];
 
+const PGN_COLLAPSED_ROWS = 10;
+
 let selectedSquare = null;
 let legalTargets = [];
+let pgnExpanded = false;
 
 function pieceSpriteSrc(piece) {
   const colorLetter = piece.color === "white" ? "w" : "b";
@@ -108,7 +111,50 @@ function renderLabels() {
   });
 }
 
+// moveHistory is a flat list of SAN strings in play order (White's move,
+// then Black's, alternating) — this groups them into the classic
+// move-number / White / Black table layout, showing only the last
+// PGN_COLLAPSED_ROWS rows unless pgnExpanded is set.
+function renderPgn(view) {
+  const table = document.getElementById("pgn-table");
+  const toggle = document.getElementById("pgn-toggle");
+  table.innerHTML = "";
+
+  const moves = view.moveHistory;
+  const totalRows = Math.ceil(moves.length / 2);
+  const isTruncated = !pgnExpanded && totalRows > PGN_COLLAPSED_ROWS;
+  const rowsToShow = isTruncated ? PGN_COLLAPSED_ROWS : totalRows;
+  const startRow = totalRows - rowsToShow;
+
+  toggle.classList.toggle("hidden", !isTruncated);
+  toggle.textContent = `··· show ${totalRows - PGN_COLLAPSED_ROWS} earlier move${totalRows - PGN_COLLAPSED_ROWS === 1 ? "" : "s"}`;
+
+  for (let row = startRow; row < totalRows; row++) {
+    const tr = document.createElement("tr");
+
+    const numberCell = document.createElement("td");
+    numberCell.className = "pgn-move-number";
+    numberCell.textContent = `${row + 1}.`;
+
+    const whiteCell = document.createElement("td");
+    whiteCell.textContent = moves[row * 2] ?? "";
+
+    const blackCell = document.createElement("td");
+    blackCell.textContent = moves[row * 2 + 1] ?? "";
+
+    tr.append(numberCell, whiteCell, blackCell);
+    table.appendChild(tr);
+  }
+}
+
+function renderFen(view) {
+  document.getElementById("fen-text").value = view.fen;
+}
+
+let currentView = null;
+
 function render(view) {
+  currentView = view;
   const board = document.getElementById("board");
   board.innerHTML = "";
 
@@ -138,6 +184,8 @@ function render(view) {
   }
 
   document.getElementById("status").textContent = statusText(view);
+  renderPgn(view);
+  renderFen(view);
 }
 
 async function handleSquareClick(squareName, view) {
@@ -179,8 +227,77 @@ async function startNewGame() {
   render(await invoke("new_game"));
 }
 
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    console.error("clipboard copy failed:", err);
+  }
+}
+
+async function loadFen() {
+  const fen = document.getElementById("fen-text").value.trim();
+  try {
+    const view = await invoke("load_fen", { fen });
+    selectedSquare = null;
+    legalTargets = [];
+    pgnExpanded = false;
+    render(view);
+  } catch (err) {
+    alert(`Couldn't load that FEN:\n${err}`);
+  }
+}
+
+async function importPgn() {
+  const pgn = window.prompt("Paste PGN to import:");
+  if (!pgn) return; // cancelled or empty
+
+  try {
+    const view = await invoke("load_pgn", { pgn });
+    selectedSquare = null;
+    legalTargets = [];
+    pgnExpanded = false;
+    render(view);
+  } catch (err) {
+    alert(`Couldn't import that PGN:\n${err}`);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   renderLabels();
   document.getElementById("new-game").addEventListener("click", startNewGame);
+
+  // Clicking the toggle expands to full history; clicking anywhere else in
+  // the panel while expanded collapses it back to the last
+  // PGN_COLLAPSED_ROWS rows. stopPropagation on the toggle keeps that same
+  // click from also bubbling up and immediately re-collapsing it.
+  document.getElementById("pgn-toggle").addEventListener("click", (event) => {
+    event.stopPropagation();
+    pgnExpanded = true;
+    renderPgn(currentView);
+  });
+  document.getElementById("pgn-panel").addEventListener("click", () => {
+    if (pgnExpanded) {
+      pgnExpanded = false;
+      renderPgn(currentView);
+    }
+  });
+
+  document.getElementById("copy-fen").addEventListener("click", () => {
+    copyToClipboard(document.getElementById("fen-text").value);
+  });
+  document.getElementById("load-fen").addEventListener("click", loadFen);
+
+  // Both header buttons live inside the click-to-collapse #pgn-panel, so
+  // they need the same stopPropagation treatment as pgn-toggle above.
+  document.getElementById("copy-pgn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyToClipboard(currentView.pgn);
+  });
+  document.getElementById("import-pgn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    importPgn();
+  });
+
   invoke("get_state").then(render);
 });
