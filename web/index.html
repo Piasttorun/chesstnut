@@ -10,10 +10,12 @@
 
   <div class="game-layout">
     <div class="board-column">
+      <div id="black-clock" class="clock"></div>
       <div class="board-wrapper">
         <div id="board"></div>
         <div id="promotion-picker" class="hidden"></div>
       </div>
+      <div id="white-clock" class="clock"></div>
       <p id="status"></p>
       <button id="new-game">New Game</button>
     </div>
@@ -36,6 +38,21 @@
     <input id="fen-text" type="text" />
     <button id="load-fen">Load</button>
     <button id="copy-fen">Copy</button>
+  </div>
+
+  <div id="clock-picker-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Choose a time control</h2>
+      <div id="clock-presets" class="clock-presets"></div>
+    </div>
+  </div>
+
+  <div id="game-over-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="game-over-title"></h2>
+      <p id="game-over-detail"></p>
+      <button id="game-over-close">New Game</button>
+    </div>
   </div>
 
   <script src="main.js"></script>
