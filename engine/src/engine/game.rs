@@ -344,6 +344,13 @@ impl Game {
         moves
     }
 
+    /// All legal moves for the side currently to move, across every piece —
+    /// what an AI opponent picks from, as opposed to `legal_moves_from`
+    /// which is scoped to a single square for the UI's click-a-piece flow.
+    pub fn legal_moves_for_turn(&self) -> Vec<Move> {
+        self.all_legal_moves(self.turn)
+    }
+
     fn all_legal_moves(&self, color: Color) -> Vec<Move> {
         let mut all = Vec::new();
         for index in 0..64 {
