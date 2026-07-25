@@ -14,6 +14,7 @@ pub enum GameStatus {
     Stalemate,
     DrawByFiftyMoveRule,
     DrawByRepetition,
+    Resignation,
     Timeout,
 }
 
@@ -72,6 +73,11 @@ pub struct Game {
     // from_fen() can start a game already partway through, where that
     // derivation would be wrong.
     fullmove_number: u32,
+    // Set by `resign()`. Unlike every other terminal state, resignation
+    // isn't derivable from the board at all — it's an explicit action — so
+    // it needs its own flag rather than falling out of `status()`'s board
+    // inspection.
+    resigned: bool,
     // Blocks `make_move` until a time control has been chosen — see
     // `new_pending_clock`/`select_time_control`. `Game::new()` and friends
     // leave this `false` (clock defaults to `ClockMode::None`) so existing
@@ -114,6 +120,7 @@ impl Game {
             history: Vec::new(),
             move_history: Vec::new(),
             fullmove_number: 1,
+            resigned: false,
             awaiting_clock_choice: false,
             clock_mode: ClockMode::None,
             white_remaining_ms: 0,
@@ -146,6 +153,7 @@ impl Game {
             history: Vec::new(),
             move_history: Vec::new(),
             fullmove_number: parsed.fullmove_number,
+            resigned: false,
             awaiting_clock_choice: false,
             clock_mode: ClockMode::None,
             white_remaining_ms: 0,
@@ -355,6 +363,9 @@ impl Game {
     }
 
     pub fn status(&self) -> GameStatus {
+        if self.resigned {
+            return GameStatus::Resignation;
+        }
         // Flagging takes priority over everything else — even a checkmate
         // sitting on the board doesn't matter if the clock already hit zero
         // first. `remaining_ms` clamps at zero via saturating_sub, so
@@ -399,8 +410,22 @@ impl Game {
                 | GameStatus::Stalemate
                 | GameStatus::DrawByFiftyMoveRule
                 | GameStatus::DrawByRepetition
+                | GameStatus::Resignation
                 | GameStatus::Timeout
         )
+    }
+
+    /// Ends the game immediately in favor of whoever is *not* currently to
+    /// move — same "the side to move is the loser" convention `status()`
+    /// already uses for checkmate, so callers infer the winner from `turn()`
+    /// exactly the way they do today. Errs if the game already ended some
+    /// other way.
+    pub fn resign(&mut self) -> Result<(), IllegalMove> {
+        if self.is_game_over() {
+            return Err(IllegalMove);
+        }
+        self.resigned = true;
+        Ok(())
     }
 
     pub fn make_move(&mut self, mv: Move) -> Result<(), IllegalMove> {
