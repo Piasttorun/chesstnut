@@ -1,6 +1,6 @@
-use chesstnut::ai::{search, Score};
+use chesstnut::ai::{best_move, search, Score};
 use chesstnut::engine::board::{Board, Color, Piece, PieceKind, Square};
-use chesstnut::engine::game::Game;
+use chesstnut::engine::game::{Game, GameStatus};
 
 fn place(board: &mut Board, square: Square, kind: PieceKind, color: Color) {
     board.set(square, Some(Piece { kind, color }));
@@ -66,4 +66,39 @@ fn search_does_not_panic_before_a_time_control_is_chosen() {
     // screen took the app down.
     let game = Game::new_pending_clock();
     assert_eq!(search(&game, 3), Score::Centipawns(0));
+}
+
+#[test]
+fn best_move_actually_delivers_the_mate_it_found() {
+    // Same position as search_finds_white_mate_in_one — this checks that
+    // the *move* best_move() hands back is the one that achieves the
+    // MateIn(1) score search() reports for it, not just that some legal
+    // move came back.
+    let mut board = Board::empty();
+    place(&mut board, Square::new(0, 7), PieceKind::King, Color::Black); // a8
+    place(&mut board, Square::new(1, 5), PieceKind::King, Color::White); // b6
+    place(&mut board, Square::new(0, 0), PieceKind::Queen, Color::White); // a1
+    let game = Game::from_board(board, Color::White);
+
+    let mv = best_move(&game, 2).expect("a mating move exists");
+    let mut after = game.clone();
+    after.make_move(mv).expect("best_move always returns a legal move");
+    assert_eq!(after.status(), GameStatus::Checkmate);
+}
+
+#[test]
+fn best_move_is_none_at_stalemate() {
+    let mut board = Board::empty();
+    place(&mut board, Square::new(7, 7), PieceKind::King, Color::Black); // h8
+    place(&mut board, Square::new(5, 6), PieceKind::King, Color::White); // f7
+    place(&mut board, Square::new(6, 5), PieceKind::Queen, Color::White); // g6
+    let game = Game::from_board(board, Color::Black);
+
+    assert_eq!(best_move(&game, 3), None);
+}
+
+#[test]
+fn best_move_is_none_before_a_time_control_is_chosen() {
+    let game = Game::new_pending_clock();
+    assert_eq!(best_move(&game, 3), None);
 }

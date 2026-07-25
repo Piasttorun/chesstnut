@@ -7,7 +7,7 @@ use crate::engine::moves::Move;
 use crate::engine::rules;
 
 use super::eval::piece_value;
-use super::{evaluate, Score};
+use super::{evaluate, Engine, Score};
 
 /// Lets a search notice mid-flight that the position it's analyzing is no
 /// longer the current one — the player made another move (or started a new
@@ -62,14 +62,17 @@ const MATE_VALUE: i32 = 1_000_000;
 /// from White's perspective, matching [`evaluate`], regardless of whose
 /// turn it is at `game`'s position.
 ///
-/// Two things keep this fast enough to be usable at the UI's depth range
-/// without a transposition table or iterative deepening: move ordering
-/// (captures first, biggest first — see `order_moves`) shrinks how much of
-/// the tree alpha-beta has to look at in the first place, and the root
-/// itself is split across every available CPU core (see
-/// `best_root_score`), since the root is the one place a chess search can
-/// be parallelized without needing to share alpha-beta state between
-/// threads.
+/// Three things keep this fast enough to be usable at the UI's depth range
+/// without a transposition table (not built yet — the natural next step
+/// once this needs to go deeper still): move ordering (captures and the
+/// previous depth's best move first — see `order_moves`) shrinks how much
+/// of the tree alpha-beta has to look at in the first place; iterative
+/// deepening (searching depth 1, 2, ..., then the target depth — see the
+/// loop in `search_cancellable`) is what supplies that "previous depth's
+/// best move" ordering hint; and the root itself is split across every
+/// available CPU core (see `best_root_score`), since the root is the one
+/// place a chess search can be parallelized without needing to share
+/// alpha-beta state between threads.
 pub fn search(game: &Game, depth: u32) -> Score {
     search_cancellable(game, depth, &Cancellation::none())
 }
@@ -79,40 +82,129 @@ pub fn search(game: &Game, depth: u32) -> Score {
 /// once `cancel` reports the position it was analyzing is stale. See
 /// [`Cancellation`].
 pub fn search_cancellable(game: &Game, depth: u32, cancel: &Cancellation) -> Score {
+    think(game, depth, cancel).0
+}
+
+/// The move [`search`] would score, if `game` actually has one — `None`
+/// only when the game is already over (checkmate/stalemate) or a time
+/// control hasn't been chosen yet. This is what a caller actually playing
+/// the move (as opposed to just displaying an evaluation, like the eval
+/// bar does) needs.
+///
+/// Checks [`super::book_move`] first — deliberately not applied to
+/// [`search`]/[`search_cancellable`] above, which are about *evaluating*
+/// the position honestly, not about what's actually best to play. A
+/// material-only eval at these depths can't tell a well-known strong
+/// opening move from a passive one, so without this the engine would
+/// happily search its way into something like an early flank pawn push
+/// purely because nothing in its evaluation function knows better yet.
+pub fn best_move(game: &Game, depth: u32) -> Option<Move> {
+    best_move_cancellable(game, depth, &Cancellation::none())
+}
+
+/// Cancellable counterpart to [`best_move`] — see [`Cancellation`] and
+/// [`search_cancellable`].
+pub fn best_move_cancellable(game: &Game, depth: u32, cancel: &Cancellation) -> Option<Move> {
+    super::book_move(game).or_else(|| think(game, depth, cancel).1)
+}
+
+/// This search, at a fixed depth, as an [`Engine`] — the interchangeable
+/// "an opponent that picks a move" interface [`RandomEngine`](super::RandomEngine)
+/// already implements. What plays the "computer" side once a play-vs-AI
+/// mode calls `Engine::choose_move` instead of the eval bar calling
+/// [`search`] directly.
+pub struct SearchEngine {
+    pub depth: u32,
+}
+
+impl Engine for SearchEngine {
+    fn choose_move(&self, game: &Game) -> Option<Move> {
+        best_move(game, self.depth)
+    }
+}
+
+/// Shared implementation behind [`search_cancellable`] and
+/// [`best_move_cancellable`] — one search, both the evaluation and the move
+/// that achieves it are usually computed together anyway, so there's no
+/// reason to run it twice for callers that want both (a future "AI plays a
+/// move and the eval bar shows what it thinks of the result" flow, say).
+fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>) {
     if game.awaiting_clock_choice() {
         // Nothing to analyze before the game has actually started — and
         // `make_move` rejects everything in this state regardless of what
         // `legal_moves_for_turn` reports, so searching would just fail.
-        return Score::Centipawns(0);
+        return (Score::Centipawns(0), None);
     }
 
     let depth = depth.max(1) as i32;
-    let moves = order_moves(game, game.legal_moves_for_turn());
+    let mut moves = order_moves(game, game.legal_moves_for_turn(), None);
 
-    let raw = if moves.is_empty() {
-        if rules::is_in_check(game.board(), game.turn()) {
+    let (raw, best_move) = if moves.is_empty() {
+        let raw = if rules::is_in_check(game.board(), game.turn()) {
             -MATE_VALUE
         } else {
             0
-        }
+        };
+        (raw, None)
     } else {
-        best_root_score(game, &moves, depth, cancel)
+        // Iterative deepening: search depth 1, then 2, ..., then the
+        // requested depth, instead of jumping straight there. Each
+        // shallower pass is cheap (exponentially fewer nodes than the
+        // final one) and its best move gets tried first at the next depth
+        // — a good first move triggers alpha-beta cutoffs in its siblings
+        // almost immediately, which consistently prunes far more of the
+        // tree than searching the target depth cold ever does. The net
+        // effect is usually faster overall despite nominally doing more
+        // search passes, which is why essentially every real engine does
+        // this rather than searching one depth in isolation.
+        let mut raw = -(MATE_VALUE + 1);
+        let mut best_move = moves[0];
+        for current_depth in 1..=depth {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let (score, mv) = best_root_score(game, &moves, current_depth, cancel);
+            if cancel.is_cancelled() {
+                // This pass was cut short partway through — its score
+                // reflects only some of the root moves, not all of them,
+                // so the previous *completed* depth's result is more
+                // trustworthy than adopting this partial one.
+                break;
+            }
+            raw = score;
+            best_move = mv;
+            moves = reorder_with_preference(moves, best_move);
+        }
+        (raw, Some(best_move))
     };
 
     let white_perspective = match game.turn() {
         Color::White => raw,
         Color::Black => -raw,
     };
-    to_score(white_perspective)
+    (to_score(white_perspective), best_move)
+}
+
+/// Moves `preferred` to the front of `moves`, leaving the rest in place —
+/// used between iterative-deepening passes so the next (deeper) pass tries
+/// the previous pass's best move first.
+fn reorder_with_preference(mut moves: Vec<Move>, preferred: Move) -> Vec<Move> {
+    if let Some(pos) = moves.iter().position(|&mv| mv == preferred) {
+        moves.swap(0, pos);
+    }
+    moves
 }
 
 /// Searches every root move in parallel, one thread per available CPU core
-/// (fewer if there are fewer moves than that). Each thread just needs the
-/// best score among the moves it was handed — alpha-beta cutoffs still
+/// (fewer if there are fewer moves than that), and returns both the best
+/// score and which move achieved it — the move is what the iterative
+/// deepening loop in `search_cancellable` feeds forward as the next,
+/// deeper pass's move-ordering preference. Each thread just needs the best
+/// (score, move) among the moves it was handed — alpha-beta cutoffs still
 /// happen normally *within* each thread's own subtree, they just aren't
 /// shared *across* threads, which is what makes this safe to parallelize
 /// without synchronization beyond collecting the results at the end.
-fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellation) -> i32 {
+fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellation) -> (i32, Move) {
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -125,8 +217,8 @@ fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellatio
         // genuine headroom for the OS, the webview/compositor, and Tauri's
         // IPC dispatch regardless of how large this machine's core count
         // is — deeper search from here on should come from better pruning
-        // (transposition tables, iterative deepening) rather than from
-        // claiming more threads, which just reopens this exact problem.
+        // (a transposition table next) rather than from claiming more
+        // threads, which just reopens this exact problem.
         .div_ceil(3)
         .max(1)
         .min(6)
@@ -153,24 +245,28 @@ fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellatio
                             }
                             let mut next = game.clone();
                             next.make_move(mv).ok()?;
-                            Some(-negamax(&next, depth - 1, 1, -(MATE_VALUE + 1), MATE_VALUE + 1))
+                            let score = -negamax(&next, depth - 1, 1, -(MATE_VALUE + 1), MATE_VALUE + 1);
+                            Some((score, mv))
                         })
-                        .max()
-                        .unwrap_or(-(MATE_VALUE + 1))
+                        .max_by_key(|(score, _)| *score)
                 })
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|handle| handle.join().expect("search thread panicked"))
-            .max()
-            .unwrap_or(-(MATE_VALUE + 1))
+            .filter_map(|handle| handle.join().expect("search thread panicked"))
+            .max_by_key(|(score, _)| *score)
+            // Only reachable if every thread's chunk was cancelled before
+            // completing a single move — the caller (search_cancellable)
+            // already discards a result found alongside a cancellation, so
+            // this fallback's move is never actually shown to anyone.
+            .unwrap_or((-(MATE_VALUE + 1), moves[0]))
     })
 }
 
 /// Returns a score from the perspective of whoever is to move in `game` —
 /// positive is good for the mover, regardless of color.
 fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 {
-    let moves = order_moves(game, game.legal_moves_for_turn());
+    let moves = order_moves(game, game.legal_moves_for_turn(), None);
 
     if moves.is_empty() {
         return if rules::is_in_check(game.board(), game.turn()) {
@@ -185,7 +281,7 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 
     }
 
     if depth == 0 {
-        return mover_relative_eval(game);
+        return quiescence(game, alpha, beta);
     }
 
     let mut best = -(MATE_VALUE + 1);
@@ -215,16 +311,65 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 
     best
 }
 
-/// Sorts captures before quiet moves, biggest capture first (an
-/// approximation of the classic MVV-LVA heuristic without weighing the
-/// attacker, just the victim). This doesn't change what the search finds —
-/// alpha-beta still visits every node it would have anyway — but trying
-/// the most promising moves first means the cutoffs in `negamax` trigger
-/// much earlier, so a large chunk of the tree never gets visited at all.
-fn order_moves(game: &Game, mut moves: Vec<Move>) -> Vec<Move> {
+/// Keeps resolving captures past the nominal depth limit until the position
+/// is "quiet" (no captures left to consider), rather than stopping cold the
+/// instant `negamax` hits depth 0. Without this, the static eval at a leaf
+/// can land mid-exchange — e.g. "I just won a pawn with my queen" one ply
+/// before the obvious recapture — which is exactly the kind of blunder a
+/// depth-limited search is prone to (the classic "horizon effect") and
+/// exactly what would make the eval bar's number untrustworthy right at
+/// the depths this app actually uses.
+///
+/// "Stand pat" (the mover may always choose not to capture at all, since
+/// captures aren't forced in chess) bounds this recursion: every recursive
+/// call must play an actual capture, which strictly reduces the number of
+/// pieces left on the board, so this terminates on its own — no explicit
+/// depth cap is needed. Not extended to check evasions when the mover is in
+/// check at a leaf; that's a known, deliberate simplification for this
+/// first pass, not an oversight.
+fn quiescence(game: &Game, mut alpha: i32, beta: i32) -> i32 {
+    let stand_pat = mover_relative_eval(game);
+    if stand_pat >= beta {
+        return beta;
+    }
+    if stand_pat > alpha {
+        alpha = stand_pat;
+    }
+
+    let captures = order_moves(game, game.legal_moves_for_turn(), None)
+        .into_iter()
+        .filter(|mv| game.board().get(mv.to).is_some());
+
+    for mv in captures {
+        let mut next = game.clone();
+        if next.make_move(mv).is_err() {
+            continue;
+        }
+        let score = -quiescence(&next, -beta, -alpha);
+        if score >= beta {
+            return beta;
+        }
+        if score > alpha {
+            alpha = score;
+        }
+    }
+    alpha
+}
+
+/// Sorts `preferred` first if present (see the iterative deepening loop in
+/// `search_cancellable`, which passes the previous — shallower — depth's
+/// best move here), then captures before quiet moves, biggest capture
+/// first (an approximation of the classic MVV-LVA heuristic without
+/// weighing the attacker, just the victim). Neither criterion changes what
+/// the search finds — alpha-beta still visits every node it would have
+/// anyway for a given depth — but trying the most promising move first
+/// means the cutoffs in `negamax` trigger much earlier, so a large chunk of
+/// the tree never gets visited at all.
+fn order_moves(game: &Game, mut moves: Vec<Move>, preferred: Option<Move>) -> Vec<Move> {
     moves.sort_by_key(|mv| {
+        let is_preferred = preferred == Some(*mv);
         let captured_value = game.board().get(mv.to).map(|p| piece_value(p.kind)).unwrap_or(0);
-        std::cmp::Reverse(captured_value)
+        (std::cmp::Reverse(is_preferred), std::cmp::Reverse(captured_value))
     });
     moves
 }

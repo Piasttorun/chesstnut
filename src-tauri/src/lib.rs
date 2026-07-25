@@ -24,6 +24,7 @@ pub fn run() {
       commands::select_time_control,
       commands::resign,
       commands::analyze,
+      commands::request_ai_move,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

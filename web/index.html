@@ -34,6 +34,8 @@
               <option value="2">Depth 2</option>
               <option value="3" selected>Depth 3</option>
               <option value="4">Depth 4</option>
+              <option value="5">Depth 5</option>
+              <option value="6">Depth 6</option>
             </select>
             <div id="eval-bar">
               <div id="eval-bar-black" class="eval-bar-segment eval-bar-black"></div>
@@ -106,6 +108,35 @@
     <div class="modal">
       <h2>Choose a time control</h2>
       <div id="clock-presets" class="clock-presets"></div>
+
+      <div class="setup-rows">
+        <div class="settings-row">
+          <span class="settings-label">Opponent</span>
+          <div class="settings-choice" id="opponent-choice">
+            <button type="button" class="settings-choice-option" data-opponent="human">Human</button>
+            <button type="button" class="settings-choice-option" data-opponent="computer">Computer</button>
+          </div>
+        </div>
+        <div class="settings-row hidden" id="color-choice-row">
+          <span class="settings-label">Play as</span>
+          <div class="settings-choice" id="color-choice">
+            <button type="button" class="settings-choice-option" data-color="white">White</button>
+            <button type="button" class="settings-choice-option" data-color="black">Black</button>
+          </div>
+        </div>
+        <div class="settings-row hidden" id="computer-depth-row">
+          <span class="settings-label">Computer strength</span>
+          <select id="computer-depth" class="eval-bar-depth">
+            <option value="1">Depth 1</option>
+            <option value="2">Depth 2</option>
+            <option value="3" selected>Depth 3</option>
+            <option value="4">Depth 4</option>
+            <option value="5">Depth 5</option>
+            <option value="6">Depth 6</option>
+          </select>
+        </div>
+      </div>
+
       <label class="eval-bar-toggle">
         <input type="checkbox" id="eval-bar-checkbox" />
         Eval bar
@@ -117,6 +148,20 @@
     <div class="modal">
       <h2 id="game-over-title"></h2>
       <p id="game-over-detail"></p>
+
+      <div class="game-over-share">
+        <div class="game-over-share-row">
+          <label for="game-over-fen">FEN</label>
+          <input id="game-over-fen" type="text" readonly />
+          <button id="game-over-copy-fen">Copy</button>
+        </div>
+        <div class="game-over-share-row">
+          <label for="game-over-pgn">PGN</label>
+          <input id="game-over-pgn" type="text" readonly />
+          <button id="game-over-copy-pgn">Copy</button>
+        </div>
+      </div>
+
       <button id="game-over-close">New Game</button>
     </div>
   </div>

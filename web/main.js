@@ -73,6 +73,38 @@ function renderSettingsPanel() {
   document.getElementById("settings-mute").checked = settings.muted;
 }
 
+// ---------- Game mode (human vs. human, or vs. the engine) ----------
+//
+// Chosen in the pre-game setup modal alongside the time control and left
+// as-is across "New Game" (so it doesn't reset to defaults every game) —
+// only opponent === "computer" is new behavior; opponent === "human" (the
+// default) reproduces the original two-humans-at-one-board experience
+// exactly, since every AI-related check below short-circuits on it.
+let gameMode = { opponent: "human", humanColor: "white", computerDepth: 3 };
+
+function renderSetupPickers() {
+  document.querySelectorAll("#opponent-choice .settings-choice-option").forEach((button) => {
+    button.classList.toggle("active", button.dataset.opponent === gameMode.opponent);
+  });
+  document.querySelectorAll("#color-choice .settings-choice-option").forEach((button) => {
+    button.classList.toggle("active", button.dataset.color === gameMode.humanColor);
+  });
+  document.getElementById("color-choice-row").classList.toggle("hidden", gameMode.opponent !== "computer");
+  document.getElementById("computer-depth-row").classList.toggle("hidden", gameMode.opponent !== "computer");
+  document.getElementById("computer-depth").value = String(gameMode.computerDepth);
+}
+
+// The board (and clocks — see renderClocks) only actually flip when
+// playing the engine as Black; two humans share one board from a single,
+// fixed orientation the way this app always has.
+function isBoardFlipped() {
+  return gameMode.opponent === "computer" && gameMode.humanColor === "black";
+}
+
+function isHumanTurn(view) {
+  return gameMode.opponent !== "computer" || view.turn === gameMode.humanColor;
+}
+
 let selectedSquare = null;
 let legalTargets = [];
 let pgnExpanded = false;
@@ -112,6 +144,20 @@ function fileOf(squareName) {
 
 function rankOf(squareName) {
   return Number(squareName[1]) - 1;
+}
+
+// Maps true chess coordinates to on-screen grid position (0-indexed
+// col/row), accounting for the board flip — used for the piece-slide
+// animation's offset math, which cares about actual screen direction, not
+// chess coordinates. Unflipped: rank 7 (rank 8) is row 0 (top), file 0
+// (the a-file) is col 0 (left) — matches render()'s default iteration
+// order. Flipped: rank 0 (rank 1) is row 0 (top), file 7 (the h-file) is
+// col 0 (left) — everything mirrored, matching render()'s flipped order.
+function visualPosition(file, rank, flipped) {
+  return {
+    col: flipped ? 7 - file : file,
+    row: flipped ? rank : 7 - rank,
+  };
 }
 
 function findKingSquare(view, color) {
@@ -373,6 +419,14 @@ function askPromotionChoice(color) {
 function statusText(view) {
   const turn = view.turn === "white" ? "White" : "Black";
   const other = view.turn === "white" ? "Black" : "White";
+  if (
+    gameMode.opponent === "computer" &&
+    !view.awaitingClockChoice &&
+    !isHumanTurn(view) &&
+    !GAME_OVER_STATUSES.has(view.status)
+  ) {
+    return "Computer is thinking…";
+  }
   switch (view.status) {
     case "checkmate":
       return `Checkmate — ${other} wins`;
@@ -424,24 +478,36 @@ function formatClock(ms) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+// #black-clock and #white-clock are fixed DOM positions (top and bottom of
+// the board respectively, per index.html's layout) — the IDs are legacy
+// names from before the board could flip, not necessarily "black's clock"
+// and "white's clock" anymore. Which color's time actually goes in which
+// slot depends on orientation, same as the board squares themselves: when
+// flipped, the human's own color sits at the bottom, so its clock does too.
 function renderClocks(view) {
-  const whiteEl = document.getElementById("white-clock");
-  const blackEl = document.getElementById("black-clock");
+  const topEl = document.getElementById("black-clock");
+  const bottomEl = document.getElementById("white-clock");
 
   if (!view.clock) {
-    whiteEl.classList.add("clock-hidden");
-    blackEl.classList.add("clock-hidden");
+    topEl.classList.add("clock-hidden");
+    bottomEl.classList.add("clock-hidden");
     return;
   }
 
-  whiteEl.classList.remove("clock-hidden");
-  blackEl.classList.remove("clock-hidden");
-  whiteEl.textContent = formatClock(view.clock.whiteMs);
-  blackEl.textContent = formatClock(view.clock.blackMs);
-  whiteEl.classList.toggle("clock-active", view.turn === "white");
-  blackEl.classList.toggle("clock-active", view.turn === "black");
-  whiteEl.classList.toggle("clock-low", view.clock.whiteMs < CLOCK_LOW_THRESHOLD_MS);
-  blackEl.classList.toggle("clock-low", view.clock.blackMs < CLOCK_LOW_THRESHOLD_MS);
+  const flipped = isBoardFlipped();
+  const topColor = flipped ? "white" : "black";
+  const bottomColor = flipped ? "black" : "white";
+  const topMs = topColor === "white" ? view.clock.whiteMs : view.clock.blackMs;
+  const bottomMs = bottomColor === "white" ? view.clock.whiteMs : view.clock.blackMs;
+
+  topEl.classList.remove("clock-hidden");
+  bottomEl.classList.remove("clock-hidden");
+  topEl.textContent = formatClock(topMs);
+  bottomEl.textContent = formatClock(bottomMs);
+  topEl.classList.toggle("clock-active", view.turn === topColor);
+  bottomEl.classList.toggle("clock-active", view.turn === bottomColor);
+  topEl.classList.toggle("clock-low", topMs < CLOCK_LOW_THRESHOLD_MS);
+  bottomEl.classList.toggle("clock-low", bottomMs < CLOCK_LOW_THRESHOLD_MS);
 }
 
 // Most games live within a pawn or so of material, so that's where the bar
@@ -603,6 +669,8 @@ function showGameOverModal(view) {
   if (!info) return;
   document.getElementById("game-over-title").textContent = info.title;
   document.getElementById("game-over-detail").textContent = info.detail;
+  document.getElementById("game-over-fen").value = view.fen;
+  document.getElementById("game-over-pgn").value = view.pgn;
   document.getElementById("game-over-overlay").classList.remove("hidden");
 }
 
@@ -646,27 +714,38 @@ async function chooseTimeControl(initialMs, incrementMs) {
 
 // Rank/file labels never change, so they're built once up front — only the
 // 64 squares inside #board get rebuilt on every state update.
+// Re-run on every render() now that the board can flip (rank/file order
+// depends on gameMode, which only settles once the pre-game setup is
+// done) — previously built once at startup, back when the board only ever
+// had one orientation. Clears its own previous output first since it can
+// now be called repeatedly.
 function renderLabels() {
   const wrapper = document.querySelector(".board-wrapper");
+  wrapper.querySelectorAll(".rank-label, .file-label, .board-corner").forEach((el) => el.remove());
 
-  for (let rank = 7; rank >= 0; rank--) {
+  const flipped = isBoardFlipped();
+  const ranks = flipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+  const files = flipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+
+  ranks.forEach((rank, index) => {
     const label = document.createElement("div");
     label.className = "rank-label";
     label.textContent = rank + 1;
-    label.style.gridRow = 8 - rank;
+    label.style.gridRow = index + 1;
     label.style.gridColumn = 1;
     wrapper.appendChild(label);
-  }
+  });
 
   const corner = document.createElement("div");
+  corner.className = "board-corner";
   corner.style.gridRow = 9;
   corner.style.gridColumn = 1;
   wrapper.appendChild(corner);
 
-  FILES.forEach((file, index) => {
+  files.forEach((file, index) => {
     const label = document.createElement("div");
     label.className = "file-label";
-    label.textContent = file;
+    label.textContent = FILES[file];
     label.style.gridRow = 9;
     label.style.gridColumn = index + 2;
     wrapper.appendChild(label);
@@ -726,14 +805,23 @@ function render(view, moveContext) {
   // actually clearing it on every render (including a plain selection
   // click that doesn't change the position) used to wipe out a perfectly
   // valid analysis and flash the bar back to the material-only score.
+  renderLabels();
   const board = document.getElementById("board");
   board.innerHTML = "";
 
   const kingInCheckSquare =
     view.status === "check" || view.status === "checkmate" ? findKingSquare(view, view.turn) : null;
 
-  for (let rank = 7; rank >= 0; rank--) {
-    for (let file = 0; file < 8; file++) {
+  // ranks/files are iterated in visual order (top-left to bottom-right) —
+  // reversed from the "normal" a1-bottom-left orientation when the board
+  // is flipped — since squares are simply appended in DOM order and placed
+  // by the CSS grid's auto-flow, not given explicit row/column positions.
+  const flipped = isBoardFlipped();
+  const ranks = flipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+  const files = flipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+
+  for (const rank of ranks) {
+    for (const file of files) {
       const squareName = `${FILES[file]}${rank + 1}`;
       const square = document.createElement("div");
       const isLight = (file + rank) % 2 === 1;
@@ -763,8 +851,10 @@ function render(view, moveContext) {
           // right after the move — without it, every later render (e.g.
           // clicking to select a different piece) would replay it, which
           // looked like a glitchy flash of the previous move re-happening.
-          const dx = (fileOf(lastMove.from) - file) * SQUARE_SIZE_REM;
-          const dy = (rank - rankOf(lastMove.from)) * SQUARE_SIZE_REM;
+          const fromPos = visualPosition(fileOf(lastMove.from), rankOf(lastMove.from), flipped);
+          const toPos = visualPosition(file, rank, flipped);
+          const dx = (fromPos.col - toPos.col) * SQUARE_SIZE_REM;
+          const dy = (fromPos.row - toPos.row) * SQUARE_SIZE_REM;
           img.style.setProperty("--dx", `${dx}rem`);
           img.style.setProperty("--dy", `${dy}rem`);
           img.classList.add("piece-arriving");
@@ -784,6 +874,18 @@ function render(view, moveContext) {
   renderEvalBar(view);
   playSoundForTransition(view, moveContext);
 
+  renderSetupPickers();
+  // Game::resign() resigns whichever side's turn it currently is — there's
+  // no explicit "which color is resigning" — so letting the human click
+  // Resign during the computer's turn would misattribute the resignation
+  // to the computer's side. Simplest correct fix: only allow it on the
+  // human's own turn, same as board input is already frozen the rest of
+  // the time it's not their move.
+  document.getElementById("resign").disabled =
+    gameMode.opponent === "computer" &&
+    !view.awaitingClockChoice &&
+    !isHumanTurn(view) &&
+    !GAME_OVER_STATUSES.has(view.status);
   document.getElementById("clock-picker-overlay").classList.toggle("hidden", !view.awaitingClockChoice);
   if (GAME_OVER_STATUSES.has(view.status)) {
     showGameOverModal(view);
@@ -791,6 +893,7 @@ function render(view, moveContext) {
     hideGameOverModal();
   }
   startClockPollingIfNeeded(view);
+  maybeTriggerAiMove(view);
 }
 
 // Shared by both interaction paths: clicking a second, already-highlighted
@@ -818,6 +921,87 @@ async function performMove(fromSquare, toSquare, view) {
   }
 }
 
+// ---------- Playing against the engine ----------
+//
+// Tracks the FEN an AI move has already been requested for, so a request
+// only ever fires once per position — render() calls maybeTriggerAiMove on
+// every render, including ones that aren't a new position at all (a clock
+// tick, switching sidebar pages, ...), and this is what keeps that from
+// re-requesting a move for a position already in flight or already
+// answered. Reset alongside lastMove wherever the position changes for a
+// reason other than a move (new game, FEN/PGN load) — same idea as why
+// lastMove gets reset there, so a stale value from a previous game/position
+// never suppresses a request that should actually fire.
+let aiMoveRequestedForFen = null;
+
+function maybeTriggerAiMove(view) {
+  if (gameMode.opponent !== "computer") return;
+  if (view.awaitingClockChoice || GAME_OVER_STATUSES.has(view.status)) return;
+  if (isHumanTurn(view)) return;
+  if (aiMoveRequestedForFen === view.fen) return;
+  aiMoveRequestedForFen = view.fen;
+  // Deferred to the next tick for the same reason updateAnalysis is (see
+  // renderEvalBar) — this render's own DOM update must get scheduled and
+  // painted before kicking off another IPC round-trip, not bundled into
+  // the same synchronous burst as it.
+  setTimeout(() => requestAiMove(view.fen), 0);
+}
+
+// Depth 6 measured well under 6s even on a slow debug build (see
+// search_bench) — this is a generous multiple of that, not a tight bound.
+// Exists so a request that never comes back for any reason (a genuine
+// backend bug, an IPC hiccup, ...) can't leave the game waiting on a move
+// forever: it's not the human's turn while the computer is "thinking," so
+// with nothing to click and no move ever arriving, that's a hard lock —
+// worth guarding against defensively even without a confirmed root cause.
+const AI_MOVE_TIMEOUT_MS = 20_000;
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
+async function requestAiMove(expectedFen) {
+  // Deliberately gameMode.computerDepth, not the eval bar's own depth
+  // dropdown — how hard the engine is thinking about the position it's
+  // showing you and how strong an opponent it plays are different
+  // questions with different natural defaults (you might want a weak,
+  // fast opponent but still watch a deep evaluation of your own moves).
+  //
+  // No artificial minimum thinking time here (there used to be one, to
+  // make an instant book move feel less like a reflex) — it maximized
+  // exactly the window where clock-poll's independent 250ms currentView
+  // update could race ahead of this request's own completion, which is
+  // what was silently discarding a perfectly good move and freezing the
+  // board mid-opening. That specific race is fixed now (see the note
+  // that used to be here, and request_ai_move's generation check on the
+  // Rust side), but the padding delay wasn't worth keeping around as a
+  // purely cosmetic feature once it had caused real harm.
+  let result;
+  try {
+    result = await withTimeout(invoke("request_ai_move", { depth: gameMode.computerDepth }), AI_MOVE_TIMEOUT_MS);
+  } catch (err) {
+    console.error("request_ai_move failed or timed out — retrying shortly:", err);
+    // Whatever went wrong, the position must never stay permanently stuck
+    // waiting on a move that's never coming: clear the "already
+    // requested" mark and try again in a moment. Only if the position is
+    // still the one this request was for — if it's moved on (a resign, a
+    // new game) in the meantime, there's nothing to retry.
+    if (currentView.fen === expectedFen) {
+      aiMoveRequestedForFen = null;
+      setTimeout(() => maybeTriggerAiMove(currentView), 1500);
+    }
+    return;
+  }
+
+  const wasCapture = !!pieceAt(currentView.board, result.to);
+  lastMove = { from: result.from, to: result.to };
+  lastMoveAnimated = false;
+  render(result.view, wasCapture ? "capture" : "move");
+}
+
 // Bumped on every call and captured locally so an out-of-order response
 // (piece A's legal_moves arriving *after* piece B's, if A's response is
 // slow enough to lose the race) never overwrites a newer selection — only
@@ -840,6 +1024,7 @@ async function selectSquare(squareName, view) {
 
 function handlePointerDown(event, squareName, view) {
   if (event.button !== 0) return; // left button only
+  if (!isHumanTurn(view)) return; // the engine's own pieces aren't the player's to move
 
   if (selectedSquare && legalTargets.includes(squareName)) {
     performMove(selectedSquare, squareName, view);
@@ -968,6 +1153,7 @@ async function startNewGame() {
   pgnExpanded = false;
   lastMove = null;
   lastMoveAnimated = false;
+  aiMoveRequestedForFen = null;
   hideGameOverModal();
   render(await invoke("new_game"));
 }
@@ -996,6 +1182,7 @@ async function loadFen() {
     pgnExpanded = false;
     lastMove = null;
     lastMoveAnimated = false;
+    aiMoveRequestedForFen = null;
     render(view);
   } catch (err) {
     alert(`Couldn't load that FEN:\n${err}`);
@@ -1013,6 +1200,7 @@ async function importPgn() {
     pgnExpanded = false;
     lastMove = null;
     lastMoveAnimated = false;
+    aiMoveRequestedForFen = null;
     render(view);
   } catch (err) {
     alert(`Couldn't import that PGN:\n${err}`);
@@ -1022,11 +1210,16 @@ async function importPgn() {
 document.addEventListener("DOMContentLoaded", () => {
   renderSidebar();
   updatePageHeading();
-  renderLabels();
   renderClockPicker();
   document.getElementById("new-game").addEventListener("click", startNewGame);
   document.getElementById("resign").addEventListener("click", resign);
   document.getElementById("game-over-close").addEventListener("click", startNewGame);
+  document.getElementById("game-over-copy-fen").addEventListener("click", () => {
+    copyToClipboard(document.getElementById("game-over-fen").value);
+  });
+  document.getElementById("game-over-copy-pgn").addEventListener("click", () => {
+    copyToClipboard(document.getElementById("game-over-pgn").value);
+  });
   document.getElementById("eval-bar-checkbox").addEventListener("change", () => renderEvalBar(currentView));
   document.getElementById("eval-bar-depth").addEventListener("change", () => renderEvalBar(currentView));
 
@@ -1067,7 +1260,13 @@ document.addEventListener("DOMContentLoaded", () => {
     event.stopPropagation();
     document.getElementById("settings-panel").classList.toggle("hidden");
   });
-  document.querySelectorAll(".settings-choice-option").forEach((button) => {
+  // Scoped to #settings-panel specifically — the opponent/color pickers in
+  // the pre-game modal reuse the same .settings-choice-option styling (see
+  // renderSetupPickers) but aren't settings.interactionMode choices, and a
+  // global selector here would misinterpret clicks on those as an attempt
+  // to set interactionMode to undefined (they carry data-opponent/
+  // data-color, not data-mode).
+  document.querySelectorAll("#settings-panel .settings-choice-option").forEach((button) => {
     button.addEventListener("click", () => {
       settings.interactionMode = button.dataset.mode;
       saveSettings();
@@ -1085,6 +1284,23 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("settings-panel").classList.add("hidden");
     }
   });
+
+  document.querySelectorAll("#opponent-choice .settings-choice-option").forEach((button) => {
+    button.addEventListener("click", () => {
+      gameMode.opponent = button.dataset.opponent;
+      renderSetupPickers();
+    });
+  });
+  document.querySelectorAll("#color-choice .settings-choice-option").forEach((button) => {
+    button.addEventListener("click", () => {
+      gameMode.humanColor = button.dataset.color;
+      renderSetupPickers();
+    });
+  });
+  document.getElementById("computer-depth").addEventListener("change", (event) => {
+    gameMode.computerDepth = Number(event.target.value);
+  });
+  renderSetupPickers();
 
   invoke("get_state").then(render);
 });
