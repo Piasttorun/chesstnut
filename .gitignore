@@ -1,0 +1,16 @@
+# Rust build artifacts (workspace root and any per-crate target dirs)
+target/
+
+# Tauri's auto-generated capability schemas (re-derived from tauri.conf.json
+# and src-tauri/capabilities/*.json on every build)
+gen/schemas/
+
+# Claude Code local session state — not shared project config
+.claude/
+
+# Editor
+.vscode/
+
+# OS cruft
+.DS_Store
+Thumbs.db
