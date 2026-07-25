@@ -1,4 +1,4 @@
-use chesstnut::ai::{Engine, RandomEngine};
+use chesstnut::ai::{evaluate, Engine, RandomEngine, Score};
 use chesstnut::engine::board::{Board, Color, Piece, PieceKind, Square};
 use chesstnut::engine::game::Game;
 
@@ -30,4 +30,30 @@ fn random_engine_returns_none_when_stalemated() {
     let engine = RandomEngine;
 
     assert_eq!(engine.choose_move(&game), None);
+}
+
+#[test]
+fn starting_position_is_materially_even() {
+    let board = Board::starting_position();
+    assert_eq!(evaluate(&board), Score::Centipawns(0));
+}
+
+#[test]
+fn evaluate_favors_white_up_a_queen() {
+    let mut board = Board::empty();
+    place(&mut board, Square::new(4, 0), PieceKind::King, Color::White);
+    place(&mut board, Square::new(4, 7), PieceKind::King, Color::Black);
+    place(&mut board, Square::new(3, 0), PieceKind::Queen, Color::White);
+
+    assert_eq!(evaluate(&board), Score::Centipawns(900));
+}
+
+#[test]
+fn evaluate_favors_black_up_a_rook() {
+    let mut board = Board::empty();
+    place(&mut board, Square::new(4, 0), PieceKind::King, Color::White);
+    place(&mut board, Square::new(4, 7), PieceKind::King, Color::Black);
+    place(&mut board, Square::new(0, 7), PieceKind::Rook, Color::Black);
+
+    assert_eq!(evaluate(&board), Score::Centipawns(-500));
 }

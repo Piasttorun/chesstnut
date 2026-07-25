@@ -24,8 +24,10 @@
 //!    optimization of it. Not planned unless a later stage actually wants
 //!    NN-based evaluation.
 
+mod eval;
 mod random;
 
+pub use eval::evaluate;
 pub use random::RandomEngine;
 
 use crate::engine::game::Game;

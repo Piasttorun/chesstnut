@@ -104,6 +104,60 @@ body {
   cursor: pointer;
 }
 
+.eval-bar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+/* ---------- Eval bar ---------- */
+
+.eval-bar-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  /* Rough alignment with the board itself (below the black clock above
+     it), not pixel-exact — good enough for a rudimentary first pass. */
+  margin-top: 3.5rem;
+}
+
+.eval-bar-column.hidden {
+  display: none;
+}
+
+#eval-bar {
+  width: 1.75rem;
+  height: 36rem;
+  display: flex;
+  flex-direction: column;
+  border: 2px solid #3a2a1a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.eval-bar-segment {
+  width: 100%;
+}
+
+.eval-bar-black {
+  background: #3a2a1a;
+}
+
+.eval-bar-white {
+  background: #f0d9b5;
+}
+
+#eval-bar-text {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
 #resign {
   color: #a12525;
   border-color: #a12525;

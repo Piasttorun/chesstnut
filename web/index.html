@@ -9,6 +9,14 @@
   <h1>Chesstnut</h1>
 
   <div class="game-layout">
+    <div id="eval-bar-column" class="eval-bar-column hidden">
+      <div id="eval-bar">
+        <div id="eval-bar-black" class="eval-bar-segment eval-bar-black"></div>
+        <div id="eval-bar-white" class="eval-bar-segment eval-bar-white"></div>
+      </div>
+      <div id="eval-bar-text"></div>
+    </div>
+
     <div class="board-column">
       <div id="black-clock" class="clock"></div>
       <div class="board-wrapper">
@@ -47,6 +55,10 @@
     <div class="modal">
       <h2>Choose a time control</h2>
       <div id="clock-presets" class="clock-presets"></div>
+      <label class="eval-bar-toggle">
+        <input type="checkbox" id="eval-bar-checkbox" />
+        Eval bar
+      </label>
     </div>
   </div>
 
