@@ -184,6 +184,10 @@ body {
   animation: layout-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.game-layout.hidden {
+  display: none;
+}
+
 /* Matches #pgn-panel's width so board-area sits exactly between two equal
    flanks, keeping it centered under the banner/FEN box above and below —
    without this the board (with nothing of its own on the left) drifts
@@ -355,6 +359,10 @@ body {
 .board-buttons {
   display: flex;
   gap: 0.5rem;
+}
+
+.board-buttons.hidden {
+  display: none;
 }
 
 button {
@@ -557,6 +565,10 @@ button:disabled:hover {
   gap: 0.4rem;
 }
 
+#import-pgn.hidden {
+  display: none;
+}
+
 #pgn-header button {
   font-size: 0.8rem;
   padding: 0.2rem 0.6rem;
@@ -604,6 +616,10 @@ button:disabled:hover {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+#fen-box.hidden {
+  display: none;
 }
 
 #fen-box label {

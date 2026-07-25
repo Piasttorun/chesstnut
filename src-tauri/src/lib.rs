@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use chesstnut::engine::game::Game;
+use commands::{AnalysisGame, AnalysisGeneration};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -14,6 +15,13 @@ pub fn run() {
     // search that the position it's analyzing is stale and stop early —
     // see chesstnut::ai::Cancellation.
     .manage(Arc::new(AtomicU64::new(0)))
+    // The Analysis tab's board — a second, independent Game rather than a
+    // second view onto the Play one, so exploring a line there can never
+    // disturb an in-progress Play game. Starts immediately playable
+    // (Game::new(), not new_pending_clock()): Analysis never has a time
+    // control to choose.
+    .manage(AnalysisGame(Mutex::new(Game::new())))
+    .manage(AnalysisGeneration(Arc::new(AtomicU64::new(0))))
     .invoke_handler(tauri::generate_handler![
       commands::new_game,
       commands::get_state,
@@ -25,6 +33,13 @@ pub fn run() {
       commands::resign,
       commands::analyze,
       commands::request_ai_move,
+      commands::analysis_get_state,
+      commands::analysis_legal_moves,
+      commands::analysis_make_move,
+      commands::analysis_reset,
+      commands::analysis_load_fen,
+      commands::analysis_load_pgn,
+      commands::analysis_analyze,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

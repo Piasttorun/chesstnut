@@ -19,7 +19,7 @@
         <img class="app-banner-icon" src="pieces/wN.svg" alt="" aria-hidden="true" />
       </div>
 
-      <div class="game-layout">
+      <div id="game-layout" class="game-layout">
         <!-- Invisible mirror of #pgn-panel's width, purely so board-area
              sits centered between two equal flanks. The eval bar itself is
              absolutely positioned inside board-area (see style.css) and
@@ -52,9 +52,17 @@
             </div>
             <div id="white-clock" class="clock"></div>
             <p id="status"></p>
-            <div class="board-buttons">
+            <!-- Play and Analysis show different action buttons (New
+                 Game/Resign vs. Reset Position/Flip Board) for the same
+                 shared board area — only one of these two rows is visible
+                 at a time, toggled by main.js based on the active page. -->
+            <div id="play-buttons" class="board-buttons hidden">
               <button id="new-game">New Game</button>
               <button id="resign">Resign</button>
+            </div>
+            <div id="analysis-buttons" class="board-buttons hidden">
+              <button id="analysis-reset">Reset Position</button>
+              <button id="analysis-flip">Flip Board</button>
             </div>
           </div>
         </div>
@@ -63,7 +71,9 @@
           <div id="pgn-header">
             <span>PGN</span>
             <span class="pgn-header-buttons">
-              <button id="import-pgn">Import</button>
+              <!-- Import only makes sense on the Analysis tab (loading a
+                   game to study) — hidden on Play, shown on Analysis. -->
+              <button id="import-pgn" class="hidden">Import</button>
               <button id="copy-pgn">Copy</button>
             </span>
           </div>
