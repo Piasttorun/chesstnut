@@ -141,7 +141,7 @@ impl fmt::Display for Board {
     }
 }
 
-fn piece_symbol(piece: Piece) -> char {
+pub(crate) fn piece_symbol(piece: Piece) -> char {
     let letter = match piece.kind {
         PieceKind::Pawn => 'p',
         PieceKind::Knight => 'n',

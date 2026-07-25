@@ -7,12 +7,37 @@
 </head>
 <body>
   <h1>Chesstnut</h1>
-  <div class="board-wrapper">
-    <div id="board"></div>
-    <div id="promotion-picker" class="hidden"></div>
+
+  <div class="game-layout">
+    <div class="board-column">
+      <div class="board-wrapper">
+        <div id="board"></div>
+        <div id="promotion-picker" class="hidden"></div>
+      </div>
+      <p id="status"></p>
+      <button id="new-game">New Game</button>
+    </div>
+
+    <div id="pgn-panel">
+      <div id="pgn-header">
+        <span>PGN</span>
+        <span class="pgn-header-buttons">
+          <button id="import-pgn">Import</button>
+          <button id="copy-pgn">Copy</button>
+        </span>
+      </div>
+      <div id="pgn-toggle" class="hidden">··· show earlier moves</div>
+      <table id="pgn-table"></table>
+    </div>
   </div>
-  <p id="status"></p>
-  <button id="new-game">New Game</button>
+
+  <div id="fen-box">
+    <label for="fen-text">FEN</label>
+    <input id="fen-text" type="text" />
+    <button id="load-fen">Load</button>
+    <button id="copy-fen">Copy</button>
+  </div>
+
   <script src="main.js"></script>
 </body>
 </html>
