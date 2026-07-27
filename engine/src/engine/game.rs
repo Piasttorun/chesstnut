@@ -248,21 +248,17 @@ impl Game {
         )
     }
 
-    /// A "pass" — flips whose turn it is without actually playing a move.
-    /// Used only by null-move pruning (see `ai::search`): searching this
-    /// position at a reduced depth answers "if my opponent could move
-    /// twice in a row, would I still be fine?", and if the answer is yes,
-    /// the real move is assumed to be at least that good without needing
-    /// to search it in full. Deliberately doesn't touch `history` — a
-    /// pass isn't a real position reached by play, so it must never count
-    /// toward threefold-repetition detection. En passant rights lapse
-    /// (no pawn just double-pushed to create them); everything else about
-    /// the position is unchanged.
-    pub(crate) fn null_move(&self) -> Self {
-        let mut next = self.clone();
-        next.turn = self.turn.opponent();
-        next.en_passant_target = None;
-        next
+    /// A lightweight, all-`Copy` snapshot of everything that determines
+    /// legal moves — see [`Position`] for why the search (`ai::search`)
+    /// recurses through these instead of cloning `Game` itself at every
+    /// node.
+    pub(crate) fn to_position(&self) -> Position {
+        Position {
+            board: self.board,
+            turn: self.turn,
+            castling_rights: self.castling_rights,
+            en_passant_target: self.en_passant_target,
+        }
     }
 
     pub fn move_history(&self) -> &[String] {
@@ -540,7 +536,7 @@ impl Game {
         let board_before = self.board;
         let legal_moves_before = self.all_legal_moves(self.turn);
 
-        self.update_castling_rights(piece, mv);
+        update_castling_rights(&mut self.castling_rights, piece, mv);
         self.en_passant_target = en_passant_target_after(piece, mv);
 
         self.board = rules::apply_move(&self.board, mv);
@@ -586,31 +582,166 @@ impl Game {
         Ok(())
     }
 
-    fn update_castling_rights(&mut self, piece: Piece, mv: Move) {
-        if piece.kind == PieceKind::King {
-            match piece.color {
-                Color::White => {
-                    self.castling_rights.white_kingside = false;
-                    self.castling_rights.white_queenside = false;
+}
+
+/// Mutates `rights` for a piece having just moved from/to the two squares
+/// `mv` names — a free function (rather than a `Game` method) so both
+/// `Game::make_move` and `Position::make_move` can share it.
+fn update_castling_rights(rights: &mut CastlingRights, piece: Piece, mv: Move) {
+    if piece.kind == PieceKind::King {
+        match piece.color {
+            Color::White => {
+                rights.white_kingside = false;
+                rights.white_queenside = false;
+            }
+            Color::Black => {
+                rights.black_kingside = false;
+                rights.black_queenside = false;
+            }
+        }
+    }
+
+    // A rook leaving its home square, or being captured there, forfeits
+    // that side's right either way — checking both `from` and `to`
+    // catches both cases in one pass.
+    for square in [mv.from, mv.to] {
+        match (square.file, square.rank) {
+            (0, 0) => rights.white_queenside = false,
+            (7, 0) => rights.white_kingside = false,
+            (0, 7) => rights.black_queenside = false,
+            (7, 7) => rights.black_kingside = false,
+            _ => {}
+        }
+    }
+}
+
+/// A lightweight, purely-mechanical snapshot of a position: the board,
+/// whose turn it is, castling rights, and the en passant target square.
+/// Nothing else `Game` tracks — move history, PGN/SAN bookkeeping, clocks,
+/// repetition history, the fullmove counter — has any bearing on what
+/// moves are legal or what a position is worth, so [`crate::ai::search`]
+/// recurses through millions of these instead of millions of `Game`
+/// clones. Every field here is `Copy`, so copying one is a plain stack
+/// copy with no heap allocation at all — unlike cloning a `Game`, which
+/// (via its `history`/`move_history`/`move_clock_log` `Vec`s and
+/// `created_date` `String`) reallocates and copies data proportional to
+/// how many moves the *real* game has played so far, at *every single
+/// node* of the search tree. For a search several dozen moves into a real
+/// game, that was easily the single largest cost per node — far more than
+/// any search heuristic (transposition table, move ordering, pruning...)
+/// changes, since none of those reduce the fixed cost paid *per node
+/// visited*, only how many nodes get visited at all.
+///
+/// Deliberately doesn't track repetition or the fifty-move rule —
+/// `ai::search` never inspected `Game::history`/`halfmove_clock` during a
+/// search even before this change existed (see `negamax`, which detects
+/// checkmate/stalemate directly from an empty move list rather than via
+/// `Game::status()`), so leaving them out here costs nothing that was
+/// actually working already. A position that's genuinely drawn by
+/// repetition deep inside the search tree still isn't recognized as such
+/// — a known limitation, not a regression from this change.
+#[derive(Clone, Copy)]
+pub(crate) struct Position {
+    board: Board,
+    turn: Color,
+    castling_rights: CastlingRights,
+    en_passant_target: Option<Square>,
+}
+
+impl Position {
+    pub(crate) fn board(&self) -> &Board {
+        &self.board
+    }
+
+    pub(crate) fn turn(&self) -> Color {
+        self.turn
+    }
+
+    /// See `Game::zobrist_hash` — identical inputs, just read from this
+    /// lighter-weight state instead.
+    pub(crate) fn zobrist_hash(&self) -> u64 {
+        zobrist::hash(
+            &self.board,
+            self.turn,
+            [
+                self.castling_rights.white_kingside,
+                self.castling_rights.white_queenside,
+                self.castling_rights.black_kingside,
+                self.castling_rights.black_queenside,
+            ],
+            self.en_passant_target,
+        )
+    }
+
+    /// See `Game::legal_moves_for_turn` — same rules (including castling
+    /// and en passant), just against this lighter-weight state.
+    pub(crate) fn legal_moves_for_turn(&self) -> Vec<Move> {
+        let mut all = Vec::new();
+        for index in 0..64 {
+            let square = Square::from_index(index);
+            if let Some(piece) = self.board.get(square) {
+                if piece.color == self.turn {
+                    all.extend(self.legal_moves_from(square));
                 }
-                Color::Black => {
-                    self.castling_rights.black_kingside = false;
-                    self.castling_rights.black_queenside = false;
+            }
+        }
+        all
+    }
+
+    fn legal_moves_from(&self, from: Square) -> Vec<Move> {
+        let mut moves = rules::legal_moves_from(&self.board, from);
+
+        for mv in en_passant_moves(&self.board, self.turn, self.en_passant_target) {
+            if mv.from == from {
+                let hypothetical = rules::apply_move(&self.board, mv);
+                if !rules::is_in_check(&hypothetical, self.turn) {
+                    moves.push(mv);
                 }
             }
         }
 
-        // A rook leaving its home square, or being captured there, forfeits
-        // that side's right either way — checking both `from` and `to`
-        // catches both cases in one pass.
-        for square in [mv.from, mv.to] {
-            match (square.file, square.rank) {
-                (0, 0) => self.castling_rights.white_queenside = false,
-                (7, 0) => self.castling_rights.white_kingside = false,
-                (0, 7) => self.castling_rights.black_queenside = false,
-                (7, 7) => self.castling_rights.black_kingside = false,
-                _ => {}
+        if let Some(piece) = self.board.get(from) {
+            if piece.kind == PieceKind::King {
+                for mv in castling_moves(&self.board, self.turn, self.castling_rights) {
+                    if mv.from == from {
+                        moves.push(mv);
+                    }
+                }
             }
+        }
+
+        moves
+    }
+
+    /// Applies `mv` in place. Unlike `Game::make_move`, infallible — every
+    /// caller (see `ai::search`) only ever passes a move this exact
+    /// position's own `legal_moves_for_turn` just produced, so there's
+    /// nothing here to reject the way `Game::make_move` has to (a clock
+    /// not yet chosen, the game already over, a move from a stale click)
+    /// for moves arriving from outside the engine.
+    pub(crate) fn make_move(&mut self, mv: Move) {
+        let piece = self
+            .board
+            .get(mv.from)
+            .expect("mv came from this position's own legal_moves_for_turn");
+        update_castling_rights(&mut self.castling_rights, piece, mv);
+        self.en_passant_target = en_passant_target_after(piece, mv);
+        self.board = rules::apply_move(&self.board, mv);
+        self.turn = self.turn.opponent();
+    }
+
+    /// A "pass" — flips whose turn it is without actually playing a move.
+    /// Used only by null-move pruning (see `ai::search`): searching this
+    /// position at a reduced depth answers "if my opponent could move
+    /// twice in a row, would I still be fine?", and if the answer is yes,
+    /// the real move is assumed to be at least that good without needing
+    /// to search it in full. En passant rights lapse (no pawn just
+    /// double-pushed to create them); everything else is unchanged.
+    pub(crate) fn null_move(&self) -> Self {
+        Position {
+            turn: self.turn.opponent(),
+            en_passant_target: None,
+            ..*self
         }
     }
 }
