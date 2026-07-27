@@ -248,6 +248,23 @@ impl Game {
         )
     }
 
+    /// A "pass" — flips whose turn it is without actually playing a move.
+    /// Used only by null-move pruning (see `ai::search`): searching this
+    /// position at a reduced depth answers "if my opponent could move
+    /// twice in a row, would I still be fine?", and if the answer is yes,
+    /// the real move is assumed to be at least that good without needing
+    /// to search it in full. Deliberately doesn't touch `history` — a
+    /// pass isn't a real position reached by play, so it must never count
+    /// toward threefold-repetition detection. En passant rights lapse
+    /// (no pawn just double-pushed to create them); everything else about
+    /// the position is unchanged.
+    pub(crate) fn null_move(&self) -> Self {
+        let mut next = self.clone();
+        next.turn = self.turn.opponent();
+        next.en_passant_target = None;
+        next
+    }
+
     pub fn move_history(&self) -> &[String] {
         &self.move_history
     }
