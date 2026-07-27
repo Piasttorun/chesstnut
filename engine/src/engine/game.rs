@@ -5,6 +5,7 @@ use crate::engine::fen;
 use crate::engine::moves::Move;
 use crate::engine::pgn;
 use crate::engine::rules;
+use crate::engine::zobrist;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameStatus {
@@ -225,6 +226,26 @@ impl Game {
 
     pub fn turn(&self) -> Color {
         self.turn
+    }
+
+    /// A 64-bit fingerprint of everything that affects which moves are
+    /// legal from here (board, whose turn it is, castling rights, en
+    /// passant target) — used by the AI's transposition table (see
+    /// `ai::search`) to recognize a position it's already searched. Two
+    /// `Game`s with the same fen (ignoring move counters, which don't
+    /// affect legality) always produce the same hash.
+    pub fn zobrist_hash(&self) -> u64 {
+        zobrist::hash(
+            &self.board,
+            self.turn,
+            [
+                self.castling_rights.white_kingside,
+                self.castling_rights.white_queenside,
+                self.castling_rights.black_kingside,
+                self.castling_rights.black_queenside,
+            ],
+            self.en_passant_target,
+        )
     }
 
     pub fn move_history(&self) -> &[String] {

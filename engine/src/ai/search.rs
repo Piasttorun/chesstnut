@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::engine::board::Color;
 use crate::engine::game::Game;
@@ -8,6 +8,112 @@ use crate::engine::rules;
 
 use super::eval::piece_value;
 use super::{evaluate, Engine, Score};
+
+/// Which kind of score a `TranspositionTable` entry actually represents —
+/// alpha-beta pruning means most nodes never get searched enough to know
+/// their *exact* value, only a bound on it (see `negamax`'s comment on
+/// where each variant comes from).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    /// The stored score is the position's true value.
+    Exact,
+    /// The true score is at least this — this node caused a beta cutoff,
+    /// so sibling moves that would have narrowed it further were never
+    /// explored.
+    Lower,
+    /// The true score is at most this — every move was searched and none
+    /// improved alpha, so nothing better than this was found (but a wider
+    /// window might have found something worse instead).
+    Upper,
+}
+
+#[derive(Clone, Copy)]
+struct TtEntry {
+    // Stored alongside the score so a lookup can confirm this slot really
+    // is the position being asked about, not a different one that happens
+    // to hash to the same index (see TABLE_SIZE below).
+    hash: u64,
+    depth: i32,
+    score: i32,
+    bound: Bound,
+    best_move: Option<Move>,
+}
+
+// 2^20 slots — a few tens of MB at this entry size, enough to hold most of
+// what a depth-6-ish search touches without the multi-hundred-MB tables a
+// "real" engine budgets. Not tuned against real data yet; a reasonable
+// starting point rather than a carefully measured one.
+const TABLE_SIZE: usize = 1 << 20;
+
+/// A depth-and-bound-aware cache from position (see `Game::zobrist_hash`)
+/// to previously computed search results, so a subtree reached by a
+/// different move order than the one that first explored it doesn't get
+/// fully re-searched from scratch. Created once per `think()` call and
+/// shared across that call's entire iterative-deepening ladder (see
+/// `think`) — depth 1's results are still sitting in the table by the time
+/// depth 2 starts, and so on — but not persisted beyond that one call: the
+/// position is guaranteed unchanged for the table's whole lifetime that
+/// way, with no staleness bookkeeping needed at all. Persisting it across
+/// separate `analyze`/`request_ai_move` calls (i.e., across a player's
+/// actual moves) would need real invalidation logic and is a next-step
+/// improvement, not this one.
+///
+/// Guarded by a single `Mutex` rather than a lock-free scheme: `best_root_score`
+/// caps itself at a handful of threads, and every node already pays for a
+/// fresh legal-move generation pass (this engine clones the board and
+/// regenerates moves rather than doing make/unmake — see `Game`'s own doc
+/// comment on why) — lock contention on a Vec index is not the bottleneck
+/// here, and a lock-free table is real engineering complexity this project
+/// doesn't need yet.
+pub(crate) struct TranspositionTable {
+    entries: Mutex<Vec<Option<TtEntry>>>,
+}
+
+impl TranspositionTable {
+    fn new() -> Self {
+        TranspositionTable { entries: Mutex::new(vec![None; TABLE_SIZE]) }
+    }
+
+    fn slot(hash: u64) -> usize {
+        (hash as usize) % TABLE_SIZE
+    }
+
+    /// Looks up `hash`, returning a score usable at `depth`/`alpha`/`beta`
+    /// if the table has one (`None` otherwise), plus the entry's stored
+    /// move regardless — even when the score itself isn't deep enough to
+    /// trust, the move it was best last time is still a good ordering hint
+    /// (see `order_moves`'s `preferred` parameter).
+    fn probe(&self, hash: u64, depth: i32, alpha: i32, beta: i32) -> (Option<i32>, Option<Move>) {
+        let entries = self.entries.lock().unwrap();
+        let Some(entry) = entries[Self::slot(hash)] else {
+            return (None, None);
+        };
+        if entry.hash != hash {
+            return (None, None); // a different position landed on the same slot
+        }
+        if entry.depth < depth {
+            return (None, entry.best_move); // not searched deep enough to trust the score
+        }
+        let usable_score = match entry.bound {
+            Bound::Exact => Some(entry.score),
+            Bound::Lower if entry.score >= beta => Some(entry.score),
+            Bound::Upper if entry.score <= alpha => Some(entry.score),
+            _ => None,
+        };
+        (usable_score, entry.best_move)
+    }
+
+    /// Always-replace: the simplest possible policy, and fine at this
+    /// scale — a deeper, more valuable entry occasionally getting evicted
+    /// by a shallower one from an unrelated position is the cost, but a
+    /// fancier replacement scheme (e.g. "only overwrite if the new depth
+    /// is >= the old one") is more complexity for a benefit this project
+    /// hasn't needed to chase yet.
+    fn store(&self, hash: u64, depth: i32, score: i32, bound: Bound, best_move: Option<Move>) {
+        let mut entries = self.entries.lock().unwrap();
+        entries[Self::slot(hash)] = Some(TtEntry { hash, depth, score, bound, best_move });
+    }
+}
 
 /// Lets a search notice mid-flight that the position it's analyzing is no
 /// longer the current one — the player made another move (or started a new
@@ -147,6 +253,11 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
         };
         (raw, None)
     } else {
+        // One table, shared across every depth in the ladder below — see
+        // TranspositionTable's own doc comment for why its lifetime is
+        // scoped to exactly this call.
+        let tt = TranspositionTable::new();
+
         // Iterative deepening: search depth 1, then 2, ..., then the
         // requested depth, instead of jumping straight there. Each
         // shallower pass is cheap (exponentially fewer nodes than the
@@ -163,7 +274,7 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
             if cancel.is_cancelled() {
                 break;
             }
-            let (score, mv) = best_root_score(game, &moves, current_depth, cancel);
+            let (score, mv) = best_root_score(game, &moves, current_depth, cancel, &tt);
             if cancel.is_cancelled() {
                 // This pass was cut short partway through — its score
                 // reflects only some of the root moves, not all of them,
@@ -204,7 +315,13 @@ fn reorder_with_preference(mut moves: Vec<Move>, preferred: Move) -> Vec<Move> {
 /// happen normally *within* each thread's own subtree, they just aren't
 /// shared *across* threads, which is what makes this safe to parallelize
 /// without synchronization beyond collecting the results at the end.
-fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellation) -> (i32, Move) {
+fn best_root_score(
+    game: &Game,
+    moves: &[Move],
+    depth: i32,
+    cancel: &Cancellation,
+    tt: &TranspositionTable,
+) -> (i32, Move) {
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -217,8 +334,11 @@ fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellatio
         // genuine headroom for the OS, the webview/compositor, and Tauri's
         // IPC dispatch regardless of how large this machine's core count
         // is — deeper search from here on should come from better pruning
-        // (a transposition table next) rather than from claiming more
-        // threads, which just reopens this exact problem.
+        // rather than from claiming more threads, which just reopens this
+        // exact problem. (The transposition table below is exactly that —
+        // shared read/write access across these threads is also why it
+        // needs its own internal locking rather than being handed out as
+        // a plain mutable reference.)
         .div_ceil(3)
         .max(1)
         .min(6)
@@ -245,7 +365,7 @@ fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellatio
                             }
                             let mut next = game.clone();
                             next.make_move(mv).ok()?;
-                            let score = -negamax(&next, depth - 1, 1, -(MATE_VALUE + 1), MATE_VALUE + 1);
+                            let score = -negamax(&next, depth - 1, 1, -(MATE_VALUE + 1), MATE_VALUE + 1, tt);
                             Some((score, mv))
                         })
                         .max_by_key(|(score, _)| *score)
@@ -265,8 +385,15 @@ fn best_root_score(game: &Game, moves: &[Move], depth: i32, cancel: &Cancellatio
 
 /// Returns a score from the perspective of whoever is to move in `game` —
 /// positive is good for the mover, regardless of color.
-fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 {
-    let moves = order_moves(game, game.legal_moves_for_turn(), None);
+fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &TranspositionTable) -> i32 {
+    let hash = game.zobrist_hash();
+    let original_alpha = alpha;
+    let (tt_score, tt_move) = tt.probe(hash, depth, alpha, beta);
+    if let Some(score) = tt_score {
+        return score;
+    }
+
+    let moves = order_moves(game, game.legal_moves_for_turn(), tt_move);
 
     if moves.is_empty() {
         return if rules::is_in_check(game.board(), game.turn()) {
@@ -285,6 +412,7 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 
     }
 
     let mut best = -(MATE_VALUE + 1);
+    let mut best_move = moves[0];
     for mv in moves {
         let mut next = game.clone();
         if next.make_move(mv).is_err() {
@@ -297,9 +425,10 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 
             // crash the whole app.
             continue;
         }
-        let score = -negamax(&next, depth - 1, ply + 1, -beta, -alpha);
+        let score = -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt);
         if score > best {
             best = score;
+            best_move = mv;
         }
         if best > alpha {
             alpha = best;
@@ -308,6 +437,23 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 
             break; // alpha-beta cutoff — the opponent already has a better option elsewhere
         }
     }
+
+    // Which kind of bound this is depends on *why* the loop stopped: cut
+    // off early (beta reached) means the true score is at least `best`
+    // (Lower) — the moves that would have proven an exact value were never
+    // tried; ran every move without ever exceeding the window it started
+    // with (`original_alpha`) means the true score is at most `best`
+    // (Upper); anything in between actually is the position's true value
+    // (Exact). See `Bound`'s own doc comment for how `probe` uses each one.
+    let bound = if best >= beta {
+        Bound::Lower
+    } else if best <= original_alpha {
+        Bound::Upper
+    } else {
+        Bound::Exact
+    };
+    tt.store(hash, depth, best, bound, Some(best_move));
+
     best
 }
 
