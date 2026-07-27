@@ -388,6 +388,22 @@ pub async fn request_ai_move(
     })
 }
 
+/// Called by the frontend the moment it gives up waiting on a
+/// `request_ai_move` call (its own client-side timeout elapsed) — see the
+/// comment on `AI_MOVE_TIMEOUT_MS` in main.js. Giving up on the *frontend*
+/// side doesn't stop that command from still running on the backend; this
+/// bumps `generation` so that if it eventually does finish, its own
+/// staleness check (just above) rejects it instead of silently applying a
+/// move nobody's waiting on anymore. Without this, an abandoned search
+/// could finish arbitrarily later and play a move for whichever side
+/// happens to be to move *by then* — which, if the human had moved on in
+/// the meantime, meant the engine appeared to move for the human's own
+/// side.
+#[tauri::command]
+pub fn abandon_ai_move(generation: State<Arc<AtomicU64>>) {
+    bump_generation(&generation);
+}
+
 #[tauri::command]
 pub fn resign(state: State<Mutex<Game>>, generation: State<Arc<AtomicU64>>) -> Result<GameView, String> {
     let mut game = state.lock().unwrap();

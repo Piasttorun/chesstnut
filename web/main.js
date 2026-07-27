@@ -1130,15 +1130,39 @@ async function requestAiMove(expectedFen) {
   } catch (err) {
     console.error("request_ai_move failed or timed out — retrying shortly:", err);
     stopAiThinkingTicker();
-    // Whatever went wrong, the position must never stay permanently stuck
-    // waiting on a move that's never coming: clear the "already
-    // requested" mark and try again in a moment. Only if the position is
-    // still the one this request was for — if it's moved on (a resign, a
-    // new game) in the meantime, there's nothing to retry.
-    if (currentView.fen === expectedFen) {
-      aiMoveRequestedForFen = null;
-      setTimeout(() => maybeTriggerAiMove(currentView), 1500);
+    // withTimeout only stops *this function* from waiting on the backend
+    // call — it doesn't cancel it. Left alone, an abandoned search can
+    // still finish on its own later and apply its move, invisibly,
+    // whenever it happens to complete. abandon_ai_move bumps the backend's
+    // generation counter so that if it does finish, its own staleness
+    // check rejects it instead of silently landing a move nobody's
+    // waiting on anymore. This must happen before the retry below, not
+    // after — a real bug here previously let the retry fire off a fresh
+    // request_ai_move using this function's own stale `expectedFen`, and
+    // if the abandoned search happened to succeed in between, the retry
+    // ended up asking the engine to move for whichever side was *actually*
+    // to move by then — the human's own side, from the human's point of
+    // view, since nothing had told the backend this side was off limits.
+    try {
+      await invoke("abandon_ai_move");
+    } catch (abandonErr) {
+      console.error("abandon_ai_move failed:", abandonErr);
     }
+
+    // Re-fetch real state rather than trusting `currentView`/`expectedFen`
+    // — both reflect the position as it stood when this request started,
+    // which is exactly the stale snapshot that let the bug above happen.
+    setTimeout(async () => {
+      const latest = await invoke("get_state");
+      paint("play", latest);
+      if (latest.fen === expectedFen) {
+        aiMoveRequestedForFen = null;
+        maybeTriggerAiMove(latest);
+      }
+      // If the fen no longer matches, the position already moved on for
+      // some other reason (a resign, a new game, ...) — nothing to retry,
+      // and the paint() above already shows whatever the real state is.
+    }, 1500);
     return;
   }
 
