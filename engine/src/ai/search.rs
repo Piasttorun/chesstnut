@@ -115,6 +115,57 @@ impl TranspositionTable {
     }
 }
 
+// Comfortably deeper than iterative deepening's target depth plus the
+// quiescence and null-move extensions ever push `ply` in practice at the
+// depths this app uses — a killer recorded past this just falls in the
+// last slot instead of its own, which only costs a little ordering
+// quality, never correctness.
+const MAX_KILLER_PLY: usize = 64;
+
+/// Two "killer" quiet moves per ply — quiet (non-capture) moves that
+/// caused a beta cutoff somewhere in the tree at that ply before, so
+/// trying them first at a sibling node (same ply, different position —
+/// unlike the transposition table, this is indexed by ply, not by
+/// position) is likely to cut off quickly there too. `order_moves`
+/// already puts captures first via a material-value heuristic; this is
+/// what gives the many *quiet* moves it otherwise leaves unordered a
+/// reasonable first guess instead of none at all. Scoped to one `think()`
+/// call, same as `TranspositionTable` and for the same reason: a cutoff
+/// from a position the player has since moved on from isn't worth
+/// remembering.
+pub(crate) struct KillerMoves {
+    slots: Mutex<Vec<[Option<Move>; 2]>>,
+}
+
+impl KillerMoves {
+    fn new() -> Self {
+        KillerMoves {
+            slots: Mutex::new(vec![[None, None]; MAX_KILLER_PLY]),
+        }
+    }
+
+    fn get(&self, ply: i32) -> [Option<Move>; 2] {
+        let index = (ply as usize).min(MAX_KILLER_PLY - 1);
+        self.slots.lock().unwrap()[index]
+    }
+
+    /// Records `mv` as the most recent killer at `ply`, bumping whatever
+    /// was already in slot 0 down to slot 1 — a small two-entry
+    /// most-recent list, not a frequency count. A no-op if `mv` is
+    /// already slot 0's occupant, so a move that keeps causing cutoffs at
+    /// this ply doesn't shuffle itself into slot 1 and back out pointlessly.
+    fn record(&self, ply: i32, mv: Move) {
+        let index = (ply as usize).min(MAX_KILLER_PLY - 1);
+        let mut slots = self.slots.lock().unwrap();
+        let pair = &mut slots[index];
+        if pair[0] == Some(mv) {
+            return;
+        }
+        pair[1] = pair[0];
+        pair[0] = Some(mv);
+    }
+}
+
 /// Lets a search notice mid-flight that the position it's analyzing is no
 /// longer the current one — the player made another move (or started a new
 /// game, loaded a FEN, ...) while a slow, deep search from the *previous*
@@ -169,16 +220,24 @@ const MATE_VALUE: i32 = 1_000_000;
 /// turn it is at `game`'s position.
 ///
 /// Several things keep this fast enough to be usable at the UI's depth
-/// range: move ordering (captures and the previous depth's/TT's best move
+/// range: move ordering (the TT move, then captures, then killer moves
 /// first — see `order_moves`) shrinks how much of the tree alpha-beta has
 /// to look at in the first place; iterative deepening (searching depth 1,
 /// 2, ..., then the target depth — see the loop in `search_cancellable`)
-/// is what supplies that "previous depth's best move" ordering hint; a
-/// transposition table (see `TranspositionTable`) avoids re-searching a
-/// subtree reached by a different move order than the one that first
-/// found it; null-move pruning (see the guard in `negamax`) skips whole
-/// subtrees the opponent couldn't escape even given a free move; and the
-/// root itself is split across every available CPU core (see
+/// is what supplies that "previous depth's best move" ordering hint, and
+/// also what aspiration windows (see `search_root_with_aspiration`) use to
+/// start each depth's root search with a narrow, cheap-to-prune guess at
+/// the score instead of a wide-open one; a transposition table (see
+/// `TranspositionTable`) avoids re-searching a subtree reached by a
+/// different move order than the one that first found it; killer moves
+/// (see `KillerMoves`) give the many quiet (non-capture) moves that
+/// ordering otherwise leaves untouched a reasonable first guess too;
+/// principal variation search (see the scout-then-re-search logic in
+/// `negamax`'s move loop) spends full-width alpha-beta effort only on the
+/// move actually expected to be best, and a cheap null-window check on
+/// every sibling; null-move pruning (see the guard in `negamax`) skips
+/// whole subtrees the opponent couldn't escape even given a free move; and
+/// the root itself is split across every available CPU core (see
 /// `best_root_score`), since the root is the one place a chess search can
 /// be parallelized without needing to share alpha-beta state between
 /// threads.
@@ -246,7 +305,7 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
     }
 
     let depth = depth.max(1) as i32;
-    let mut moves = order_moves(game, game.legal_moves_for_turn(), None);
+    let mut moves = order_moves(game, game.legal_moves_for_turn(), None, [None, None]);
 
     let (raw, best_move) = if moves.is_empty() {
         let raw = if rules::is_in_check(game.board(), game.turn()) {
@@ -260,6 +319,7 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
         // TranspositionTable's own doc comment for why its lifetime is
         // scoped to exactly this call.
         let tt = TranspositionTable::new();
+        let killers = KillerMoves::new();
 
         // Iterative deepening: search depth 1, then 2, ..., then the
         // requested depth, instead of jumping straight there. Each
@@ -277,7 +337,24 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
             if cancel.is_cancelled() {
                 break;
             }
-            let (score, mv) = best_root_score(game, &moves, current_depth, cancel, &tt);
+            // Aspiration windows: every depth after the first has a
+            // genuine prior guess at the score (the previous, shallower
+            // depth's result) — a real move rarely swings the position's
+            // value by much versus one ply less of lookahead, so starting
+            // alpha-beta narrowly around that guess (see
+            // search_root_with_aspiration) lets far more of the tree get
+            // cut off than the wide-open window the very first depth has
+            // no choice but to use.
+            let (score, mv) = search_root_with_aspiration(
+                game,
+                &moves,
+                current_depth,
+                cancel,
+                &tt,
+                &killers,
+                raw,
+                current_depth > 1,
+            );
             if cancel.is_cancelled() {
                 // This pass was cut short partway through — its score
                 // reflects only some of the root moves, not all of them,
@@ -309,6 +386,49 @@ fn reorder_with_preference(mut moves: Vec<Move>, preferred: Move) -> Vec<Move> {
     moves
 }
 
+// Centipawns either side of the previous depth's score that
+// search_root_with_aspiration tries first — half a pawn. Narrow enough to
+// meaningfully cut the tree down versus a wide-open window, wide enough
+// that an ordinary quiet move's natural score fluctuation between one
+// depth and the next usually still lands inside it.
+const ASPIRATION_WINDOW: i32 = 50;
+
+/// One iterative-deepening depth's root search, with an aspiration
+/// window: every depth past the first already has a real guess at the
+/// answer (`previous_score`, the previous depth's result), so this tries
+/// a narrow window around that guess first — most of the time the real
+/// score still lands inside it, and alpha-beta prunes far more of the
+/// tree with a narrow window than a wide-open one. If the guess turns out
+/// wrong (the narrow search fails low or high — the true score lies
+/// outside the window it was given, so the result can't be trusted as
+/// exact), this falls back to a full-width re-search of the same depth
+/// rather than trying to widen incrementally: simpler, and the guess
+/// being wrong is the uncommon case, so paying full price for it when it
+/// happens still comes out ahead of never trying the shortcut at all.
+/// `use_aspiration` is `false` for the very first depth, which has no
+/// previous score to aim at.
+fn search_root_with_aspiration(
+    game: &Game,
+    moves: &[Move],
+    depth: i32,
+    cancel: &Cancellation,
+    tt: &TranspositionTable,
+    killers: &KillerMoves,
+    previous_score: i32,
+    use_aspiration: bool,
+) -> (i32, Move) {
+    if use_aspiration {
+        let alpha = previous_score.saturating_sub(ASPIRATION_WINDOW);
+        let beta = previous_score.saturating_add(ASPIRATION_WINDOW);
+        let (score, mv) = best_root_score(game, moves, depth, cancel, tt, killers, alpha, beta);
+        if cancel.is_cancelled() || (score > alpha && score < beta) {
+            return (score, mv);
+        }
+        // Fail low or fail high — fall through to the full-width re-search below.
+    }
+    best_root_score(game, moves, depth, cancel, tt, killers, -(MATE_VALUE + 1), MATE_VALUE + 1)
+}
+
 /// Searches every root move in parallel, one thread per available CPU core
 /// (fewer if there are fewer moves than that), and returns both the best
 /// score and which move achieved it — the move is what the iterative
@@ -316,14 +436,22 @@ fn reorder_with_preference(mut moves: Vec<Move>, preferred: Move) -> Vec<Move> {
 /// deeper pass's move-ordering preference. Each thread just needs the best
 /// (score, move) among the moves it was handed — alpha-beta cutoffs still
 /// happen normally *within* each thread's own subtree, they just aren't
-/// shared *across* threads, which is what makes this safe to parallelize
-/// without synchronization beyond collecting the results at the end.
+/// shared *across* threads (nor is `alpha` narrowed across sibling root
+/// moves within one call, unlike a single-threaded root would do — both
+/// are a known, deliberate simplification from parallelizing at the
+/// root), which is what makes this safe to parallelize without
+/// synchronization beyond collecting the results at the end. `alpha`/
+/// `beta` come from the caller (see `search_root_with_aspiration`) rather
+/// than always being the widest possible window.
 fn best_root_score(
     game: &Game,
     moves: &[Move],
     depth: i32,
     cancel: &Cancellation,
     tt: &TranspositionTable,
+    killers: &KillerMoves,
+    alpha: i32,
+    beta: i32,
 ) -> (i32, Move) {
     let thread_count = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -368,7 +496,7 @@ fn best_root_score(
                             }
                             let mut next = game.clone();
                             next.make_move(mv).ok()?;
-                            let score = -negamax(&next, depth - 1, 1, -(MATE_VALUE + 1), MATE_VALUE + 1, tt);
+                            let score = -negamax(&next, depth - 1, 1, -beta, -alpha, tt, killers);
                             Some((score, mv))
                         })
                         .max_by_key(|(score, _)| *score)
@@ -388,7 +516,15 @@ fn best_root_score(
 
 /// Returns a score from the perspective of whoever is to move in `game` —
 /// positive is good for the mover, regardless of color.
-fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &TranspositionTable) -> i32 {
+fn negamax(
+    game: &Game,
+    depth: i32,
+    ply: i32,
+    mut alpha: i32,
+    beta: i32,
+    tt: &TranspositionTable,
+    killers: &KillerMoves,
+) -> i32 {
     let hash = game.zobrist_hash();
     let original_alpha = alpha;
     let (tt_score, tt_move) = tt.probe(hash, depth, alpha, beta);
@@ -396,7 +532,7 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &Tr
         return score;
     }
 
-    let moves = order_moves(game, game.legal_moves_for_turn(), tt_move);
+    let moves = order_moves(game, game.legal_moves_for_turn(), tt_move, killers.get(ply));
 
     if moves.is_empty() {
         return if rules::is_in_check(game.board(), game.turn()) {
@@ -437,14 +573,36 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &Tr
         && has_non_pawn_material(game, game.turn())
     {
         let null_game = game.null_move();
-        let score = -negamax(&null_game, depth - 1 - NULL_MOVE_REDUCTION, ply + 1, -beta, -beta + 1, tt);
+        let score = -negamax(
+            &null_game,
+            depth - 1 - NULL_MOVE_REDUCTION,
+            ply + 1,
+            -beta,
+            -beta + 1,
+            tt,
+            killers,
+        );
         if score >= beta {
             return beta;
         }
     }
 
+    // Principal variation search: move ordering (TT move, then captures,
+    // then killers — see `order_moves`) means the first move tried here
+    // is usually already the best one, so every move after it only needs
+    // to answer a cheap yes/no question first — "is this better than
+    // `alpha`?" — via a zero-width (null) window, rather than paying for
+    // a full-width search to find out its exact value up front. Only a
+    // move that actually answers "yes" (score lands strictly inside
+    // (alpha, beta), meaning the null window wasn't enough to place it)
+    // gets the full-width re-search its real value needs. When move
+    // ordering is good, this is almost pure savings; when a later move
+    // does turn out to beat every one before it, the one extra re-search
+    // it costs is still cheaper than every sibling having paid full price
+    // from the start.
     let mut best = -(MATE_VALUE + 1);
     let mut best_move = moves[0];
+    let mut is_first_move = true;
     for mv in moves {
         let mut next = game.clone();
         if next.make_move(mv).is_err() {
@@ -457,7 +615,17 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &Tr
             // crash the whole app.
             continue;
         }
-        let score = -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt);
+        let score = if is_first_move {
+            -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt, killers)
+        } else {
+            let scout = -negamax(&next, depth - 1, ply + 1, -alpha - 1, -alpha, tt, killers);
+            if scout > alpha && scout < beta {
+                -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt, killers)
+            } else {
+                scout
+            }
+        };
+        is_first_move = false;
         if score > best {
             best = score;
             best_move = mv;
@@ -466,6 +634,16 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &Tr
             alpha = best;
         }
         if alpha >= beta {
+            // A quiet move (one that wasn't already going to be tried
+            // early via the capture-ordering heuristic) just proved good
+            // enough to cut this node off entirely — worth remembering
+            // for sibling nodes at the same ply. Captures are excluded
+            // since `order_moves` already puts them first on their own
+            // merits; recording one here would just waste a killer slot
+            // on a move that didn't need the help.
+            if game.board().get(mv.to).is_none() {
+                killers.record(ply, mv);
+            }
             break; // alpha-beta cutoff — the opponent already has a better option elsewhere
         }
     }
@@ -514,7 +692,7 @@ fn quiescence(game: &Game, mut alpha: i32, beta: i32) -> i32 {
         alpha = stand_pat;
     }
 
-    let captures = order_moves(game, game.legal_moves_for_turn(), None)
+    let captures = order_moves(game, game.legal_moves_for_turn(), None, [None, None])
         .into_iter()
         .filter(|mv| game.board().get(mv.to).is_some());
 
@@ -536,18 +714,24 @@ fn quiescence(game: &Game, mut alpha: i32, beta: i32) -> i32 {
 
 /// Sorts `preferred` first if present (see the iterative deepening loop in
 /// `search_cancellable`, which passes the previous — shallower — depth's
-/// best move here), then captures before quiet moves, biggest capture
-/// first (an approximation of the classic MVV-LVA heuristic without
-/// weighing the attacker, just the victim). Neither criterion changes what
-/// the search finds — alpha-beta still visits every node it would have
-/// anyway for a given depth — but trying the most promising move first
-/// means the cutoffs in `negamax` trigger much earlier, so a large chunk of
-/// the tree never gets visited at all.
-fn order_moves(game: &Game, mut moves: Vec<Move>, preferred: Option<Move>) -> Vec<Move> {
+/// best move here), then captures, biggest first (an approximation of the
+/// classic MVV-LVA heuristic without weighing the attacker, just the
+/// victim), then `killers` (see `KillerMoves`) ahead of the remaining
+/// quiet moves they otherwise leave unordered. None of these criteria
+/// change what the search finds — alpha-beta still visits every node it
+/// would have anyway for a given depth — but trying the most promising
+/// move first means the cutoffs in `negamax` trigger much earlier, so a
+/// large chunk of the tree never gets visited at all.
+fn order_moves(game: &Game, mut moves: Vec<Move>, preferred: Option<Move>, killers: [Option<Move>; 2]) -> Vec<Move> {
     moves.sort_by_key(|mv| {
         let is_preferred = preferred == Some(*mv);
         let captured_value = game.board().get(mv.to).map(|p| piece_value(p.kind)).unwrap_or(0);
-        (std::cmp::Reverse(is_preferred), std::cmp::Reverse(captured_value))
+        let is_killer = captured_value == 0 && killers.contains(&Some(*mv));
+        (
+            std::cmp::Reverse(is_preferred),
+            std::cmp::Reverse(captured_value),
+            std::cmp::Reverse(is_killer),
+        )
     });
     moves
 }
