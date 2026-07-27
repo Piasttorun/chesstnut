@@ -33,6 +33,7 @@ pub fn run() {
       commands::resign,
       commands::analyze,
       commands::request_ai_move,
+      commands::abandon_ai_move,
       commands::analysis_get_state,
       commands::analysis_legal_moves,
       commands::analysis_make_move,
