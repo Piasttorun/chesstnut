@@ -274,10 +274,35 @@ pub fn best_move(game: &Game, depth: u32) -> Option<Move> {
     best_move_cancellable(game, depth, &Cancellation::none())
 }
 
+// Below this many plies played, a position that's fallen out of book (see
+// super::book_move) still has an opening's huge branching factor working
+// against it — far more legal moves per side than a middlegame or
+// endgame position, and far fewer forcing tactical lines for alpha-beta
+// to cut off on early, which together are exactly what let a real
+// off-book opening (the London System, reported by a user) blow past
+// even a generous timeout at the UI's full requested depth. A hardcoded
+// fallback move (e.g. always "e4") isn't the fix — it'd need to be
+// color-aware, could easily be illegal in whatever's already been played,
+// and wouldn't account for the actual position at all — so instead this
+// caps the depth itself: still a real, fully legal search of the actual
+// position, just shallower. Genuinely deep opening theory rarely turns on
+// calculating this far ahead anyway, so the accuracy given up here is
+// small next to the responsiveness it buys back exactly where the book
+// was supposed to have covered things but didn't.
+const OPENING_PHASE_PLIES: usize = 10;
+const OPENING_FALLBACK_DEPTH: u32 = 4;
+
 /// Cancellable counterpart to [`best_move`] — see [`Cancellation`] and
 /// [`search_cancellable`].
 pub fn best_move_cancellable(game: &Game, depth: u32, cancel: &Cancellation) -> Option<Move> {
-    super::book_move(game).or_else(|| think(game, depth, cancel).1)
+    super::book_move(game).or_else(|| {
+        let effective_depth = if game.move_history().len() < OPENING_PHASE_PLIES {
+            depth.min(OPENING_FALLBACK_DEPTH)
+        } else {
+            depth
+        };
+        think(game, effective_depth, cancel).1
+    })
 }
 
 /// This search, at a fixed depth, as an [`Engine`] — the interchangeable
