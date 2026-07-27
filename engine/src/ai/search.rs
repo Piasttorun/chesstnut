@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::engine::board::Color;
+use crate::engine::board::{Color, PieceKind, Square};
 use crate::engine::game::Game;
 use crate::engine::moves::Move;
 use crate::engine::rules;
@@ -168,17 +168,20 @@ const MATE_VALUE: i32 = 1_000_000;
 /// from White's perspective, matching [`evaluate`], regardless of whose
 /// turn it is at `game`'s position.
 ///
-/// Three things keep this fast enough to be usable at the UI's depth range
-/// without a transposition table (not built yet — the natural next step
-/// once this needs to go deeper still): move ordering (captures and the
-/// previous depth's best move first — see `order_moves`) shrinks how much
-/// of the tree alpha-beta has to look at in the first place; iterative
-/// deepening (searching depth 1, 2, ..., then the target depth — see the
-/// loop in `search_cancellable`) is what supplies that "previous depth's
-/// best move" ordering hint; and the root itself is split across every
-/// available CPU core (see `best_root_score`), since the root is the one
-/// place a chess search can be parallelized without needing to share
-/// alpha-beta state between threads.
+/// Several things keep this fast enough to be usable at the UI's depth
+/// range: move ordering (captures and the previous depth's/TT's best move
+/// first — see `order_moves`) shrinks how much of the tree alpha-beta has
+/// to look at in the first place; iterative deepening (searching depth 1,
+/// 2, ..., then the target depth — see the loop in `search_cancellable`)
+/// is what supplies that "previous depth's best move" ordering hint; a
+/// transposition table (see `TranspositionTable`) avoids re-searching a
+/// subtree reached by a different move order than the one that first
+/// found it; null-move pruning (see the guard in `negamax`) skips whole
+/// subtrees the opponent couldn't escape even given a free move; and the
+/// root itself is split across every available CPU core (see
+/// `best_root_score`), since the root is the one place a chess search can
+/// be parallelized without needing to share alpha-beta state between
+/// threads.
 pub fn search(game: &Game, depth: u32) -> Score {
     search_cancellable(game, depth, &Cancellation::none())
 }
@@ -411,6 +414,35 @@ fn negamax(game: &Game, depth: i32, ply: i32, mut alpha: i32, beta: i32, tt: &Tr
         return quiescence(game, alpha, beta);
     }
 
+    // Null-move pruning: ask "if the side to move got to pass — handing the
+    // opponent a free move — would I still be at least this good?" via a
+    // cheap, deeply-reduced search. If even that best case for the
+    // opponent still fails high, the real move (which is never worse than
+    // passing) almost certainly would too, so the whole subtree gets
+    // skipped without expanding it for real. `NULL_MOVE_REDUCTION` (how
+    // many plies shallower that verification search goes) follows the
+    // common R=2 choice from chess programming literature rather than
+    // anything tuned against this engine specifically.
+    //
+    // Two guards keep this from misfiring: skipped while in check (a
+    // "free move" that leaves the king hanging isn't a legal position to
+    // reason about at all), and skipped whenever the mover has nothing but
+    // king and pawns left (king-and-pawn endgames are exactly where
+    // zugzwang — every move only makes your position worse — is common,
+    // which is the one case "passing would be fine" does NOT imply "moving
+    // is fine too").
+    const NULL_MOVE_REDUCTION: i32 = 2;
+    if depth > NULL_MOVE_REDUCTION
+        && !rules::is_in_check(game.board(), game.turn())
+        && has_non_pawn_material(game, game.turn())
+    {
+        let null_game = game.null_move();
+        let score = -negamax(&null_game, depth - 1 - NULL_MOVE_REDUCTION, ply + 1, -beta, -beta + 1, tt);
+        if score >= beta {
+            return beta;
+        }
+    }
+
     let mut best = -(MATE_VALUE + 1);
     let mut best_move = moves[0];
     for mv in moves {
@@ -518,6 +550,20 @@ fn order_moves(game: &Game, mut moves: Vec<Move>, preferred: Option<Move>) -> Ve
         (std::cmp::Reverse(is_preferred), std::cmp::Reverse(captured_value))
     });
     moves
+}
+
+/// Whether `color` has any piece besides its king and pawns — see the
+/// zugzwang guard on null-move pruning in `negamax`.
+fn has_non_pawn_material(game: &Game, color: Color) -> bool {
+    for index in 0..64 {
+        let square = Square::from_index(index);
+        if let Some(piece) = game.board().get(square) {
+            if piece.color == color && piece.kind != PieceKind::Pawn && piece.kind != PieceKind::King {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn mover_relative_eval(game: &Game) -> i32 {
