@@ -479,7 +479,12 @@ function statusText(page, view) {
     !isHumanTurn(view) &&
     !GAME_OVER_STATUSES.has(view.status)
   ) {
-    return "Computer is thinking…";
+    // aiThinkingStartedAt is set the instant requestAiMove actually starts
+    // (see there) — a deep search can now legitimately take tens of
+    // seconds since a slow position no longer looks indistinguishable from
+    // a stuck one, this ticking count is the difference.
+    const elapsedSeconds = aiThinkingStartedAt === null ? 0 : Math.floor((Date.now() - aiThinkingStartedAt) / 1000);
+    return `Computer is thinking… (${elapsedSeconds}s)`;
   }
   switch (view.status) {
     case "checkmate":
@@ -1048,20 +1053,58 @@ function maybeTriggerAiMove(view) {
   setTimeout(() => requestAiMove(view.fen), 0);
 }
 
-// Depth 6 measured well under 6s even on a slow debug build (see
-// search_bench) — this is a generous multiple of that, not a tight bound.
-// Exists so a request that never comes back for any reason (a genuine
-// backend bug, an IPC hiccup, ...) can't leave the game waiting on a move
-// forever: it's not the human's turn while the computer is "thinking," so
-// with nothing to click and no move ever arriving, that's a hard lock —
-// worth guarding against defensively even without a confirmed root cause.
-const AI_MOVE_TIMEOUT_MS = 20_000;
+// A transposition table (see engine/src/ai/search.rs) since made depth 6
+// meaningfully faster in most positions, but a busy middlegame can still
+// legitimately take ~30s at that depth — comfortably under this, but well
+// past what the old 20s limit allowed for. Exists so a request that never
+// comes back for any *other* reason (a genuine backend bug, an IPC
+// hiccup, ...) can't leave the game waiting on a move forever: it's not
+// the human's turn while the computer is "thinking," so with nothing to
+// click and no move ever arriving, that's a hard lock — worth guarding
+// against defensively even without a confirmed root cause.
+const AI_MOVE_TIMEOUT_MS = 60_000;
 
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)),
   ]);
+}
+
+// Set the instant a request actually starts, cleared the instant it
+// settles (either way) — statusText reads this to show a live "Computer is
+// thinking… (Ns)" count instead of a bare, unchanging message. A slow
+// depth-6 search taking 30s now looks exactly like a stuck one unless
+// there's some visible sign it's still working; a ticking counter is that
+// sign, cheap as it is.
+let aiThinkingStartedAt = null;
+let aiThinkingTickHandle = null;
+
+function startAiThinkingTicker() {
+  if (aiThinkingTickHandle !== null) {
+    clearInterval(aiThinkingTickHandle);
+  }
+  aiThinkingStartedAt = Date.now();
+  // Only touches the #status text directly (not a full paint()) for the
+  // same reason clock polling doesn't call render() on every tick — no
+  // need to rebuild the board and re-bind 64 click listeners four times a
+  // second just to update one line of text. Guarded on activePage — #status
+  // is shared with the Analysis tab (see paint()), so this must not paint
+  // over Analysis's own status while Play's AI is thinking in the
+  // background.
+  aiThinkingTickHandle = setInterval(() => {
+    if (activePage === "play") {
+      document.getElementById("status").textContent = statusText("play", currentView);
+    }
+  }, 250);
+}
+
+function stopAiThinkingTicker() {
+  aiThinkingStartedAt = null;
+  if (aiThinkingTickHandle !== null) {
+    clearInterval(aiThinkingTickHandle);
+    aiThinkingTickHandle = null;
+  }
 }
 
 async function requestAiMove(expectedFen) {
@@ -1080,11 +1123,13 @@ async function requestAiMove(expectedFen) {
   // that used to be here, and request_ai_move's generation check on the
   // Rust side), but the padding delay wasn't worth keeping around as a
   // purely cosmetic feature once it had caused real harm.
+  startAiThinkingTicker();
   let result;
   try {
     result = await withTimeout(invoke("request_ai_move", { depth: gameMode.computerDepth }), AI_MOVE_TIMEOUT_MS);
   } catch (err) {
     console.error("request_ai_move failed or timed out — retrying shortly:", err);
+    stopAiThinkingTicker();
     // Whatever went wrong, the position must never stay permanently stuck
     // waiting on a move that's never coming: clear the "already
     // requested" mark and try again in a moment. Only if the position is
@@ -1097,6 +1142,7 @@ async function requestAiMove(expectedFen) {
     return;
   }
 
+  stopAiThinkingTicker();
   const wasCapture = !!pieceAt(currentView.board, result.to);
   lastMove = { from: result.from, to: result.to };
   lastMoveAnimated = false;
@@ -1256,6 +1302,7 @@ async function startNewGame() {
   lastMove = null;
   lastMoveAnimated = false;
   aiMoveRequestedForFen = null;
+  stopAiThinkingTicker();
   hideGameOverModal();
   render(await invoke("new_game"));
 }
@@ -1264,6 +1311,7 @@ async function resign() {
   if (!confirm(`Are you sure ${currentView.turn === "white" ? "White" : "Black"} wants to resign?`)) {
     return;
   }
+  stopAiThinkingTicker();
   render(await invoke("resign"));
 }
 
@@ -1289,7 +1337,10 @@ async function loadFen() {
     pgnExpanded = false;
     lastMove = null;
     lastMoveAnimated = false;
-    if (page === "play") aiMoveRequestedForFen = null;
+    if (page === "play") {
+      aiMoveRequestedForFen = null;
+      stopAiThinkingTicker();
+    }
     paint(page, view);
   } catch (err) {
     alert(`Couldn't load that FEN:\n${err}`);
