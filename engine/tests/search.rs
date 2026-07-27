@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use chesstnut::ai::{best_move, search, Score};
 use chesstnut::engine::board::{Board, Color, Piece, PieceKind, Square};
 use chesstnut::engine::game::{Game, GameStatus};
@@ -103,4 +105,30 @@ fn best_move_is_none_at_stalemate() {
 fn best_move_is_none_before_a_time_control_is_chosen() {
     let game = Game::new_pending_clock();
     assert_eq!(best_move(&game, 3), None);
+}
+
+/// Regression test for a reported bug: 1. a4 isn't covered by any opening
+/// book line (see opening_book.rs), so this exercises the opening-phase
+/// depth cap in best_move_cancellable directly. Without it, an early
+/// position's huge branching factor made even depth 8 take many seconds
+/// in a real reported game (the London System, several moves further in
+/// than this) — confirms that's now capped down automatically this early
+/// rather than honoring the full requested depth and stalling.
+#[test]
+fn best_move_caps_depth_during_an_early_off_book_opening() {
+    let mut game = Game::new();
+    let a2 = Square::new(0, 1);
+    let a4 = Square::new(0, 3);
+    let mv = game.legal_moves_from(a2).into_iter().find(|mv| mv.to == a4).expect("a2a4 is legal");
+    game.make_move(mv).expect("a2a4 should apply");
+
+    let start = Instant::now();
+    let chosen = best_move(&game, 8);
+    let elapsed = start.elapsed();
+
+    assert!(chosen.is_some());
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "expected the opening-phase depth cap to keep this fast, took {elapsed:?}"
+    );
 }

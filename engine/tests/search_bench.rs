@@ -138,9 +138,9 @@ fn probe_depths(label: &str, game: &Game) {
 }
 
 /// The two most common opening moments: the very first move, and the
-/// first reply to 1.e4. Both are covered by the current 8-line book, so
-/// this is expected to report "instant" for each — that's the point, not
-/// a gap in the measurement (see the module doc comment above).
+/// first reply to 1.e4. Both are covered by the current book, so this is
+/// expected to report "instant" for each — that's the point, not a gap in
+/// the measurement (see the module doc comment above).
 #[test]
 #[ignore]
 fn bench_opening_move_depth() {
