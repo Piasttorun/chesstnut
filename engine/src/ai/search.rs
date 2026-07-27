@@ -235,12 +235,16 @@ const MATE_VALUE: i32 = 1_000_000;
 /// principal variation search (see the scout-then-re-search logic in
 /// `negamax`'s move loop) spends full-width alpha-beta effort only on the
 /// move actually expected to be best, and a cheap null-window check on
-/// every sibling; null-move pruning (see the guard in `negamax`) skips
-/// whole subtrees the opponent couldn't escape even given a free move; and
-/// the root itself is split across every available CPU core (see
-/// `best_root_score`), since the root is the one place a chess search can
-/// be parallelized without needing to share alpha-beta state between
-/// threads.
+/// every sibling; late move reductions (see the same move loop) shrink
+/// that check further still for the moves ordering trusts least — a
+/// quiet, non-check move found well past the start of the list — using a
+/// shallower depth for its first look and only paying full depth if that
+/// shallow look comes back surprisingly good; null-move pruning (see the
+/// guard in `negamax`) skips whole subtrees the opponent couldn't escape
+/// even given a free move; and the root itself is split across every
+/// available CPU core (see `best_root_score`), since the root is the one
+/// place a chess search can be parallelized without needing to share
+/// alpha-beta state between threads.
 pub fn search(game: &Game, depth: u32) -> Score {
     search_cancellable(game, depth, &Cancellation::none())
 }
@@ -587,23 +591,41 @@ fn negamax(
         }
     }
 
-    // Principal variation search: move ordering (TT move, then captures,
-    // then killers — see `order_moves`) means the first move tried here
-    // is usually already the best one, so every move after it only needs
-    // to answer a cheap yes/no question first — "is this better than
-    // `alpha`?" — via a zero-width (null) window, rather than paying for
-    // a full-width search to find out its exact value up front. Only a
-    // move that actually answers "yes" (score lands strictly inside
-    // (alpha, beta), meaning the null window wasn't enough to place it)
-    // gets the full-width re-search its real value needs. When move
-    // ordering is good, this is almost pure savings; when a later move
-    // does turn out to beat every one before it, the one extra re-search
-    // it costs is still cheaper than every sibling having paid full price
-    // from the start.
+    // Principal variation search: move ordering (the TT move, then
+    // captures, then killers — see `order_moves`) means the first move
+    // tried here is usually already the best one, so every move after it
+    // only needs to answer a cheap yes/no question first — "is this
+    // better than `alpha`?" — via a zero-width (null) window, rather than
+    // paying for a full-width search to find out its exact value up
+    // front. Only a move that actually answers "yes" (score lands
+    // strictly inside (alpha, beta), meaning the null window wasn't
+    // enough to place it) gets the full-width re-search its real value
+    // needs. When move ordering is good, this is almost pure savings;
+    // when a later move does turn out to beat every one before it, the
+    // one extra re-search it costs is still cheaper than every sibling
+    // having paid full price from the start.
+    //
+    // Late move reductions (LMR) go a step further for the moves PVS's
+    // own ordering says are *least* likely to matter: a quiet move that's
+    // neither escaping nor delivering check, found well past the start of
+    // an already-ordered move list, gets its scout search at a shallower
+    // depth still (`LMR_REDUCTION` less) — cheaper again than a
+    // full-depth scout. Same safety net as PVS covers the case where
+    // ordering was wrong about it: a reduced scout that beats `alpha`
+    // gets re-verified at full depth (still with a null window, so it's
+    // one more cheap check, not a full-width search) before being trusted
+    // enough to trigger PVS's own full-width re-search above. Excluded
+    // from reduction: captures (already tried early via material value,
+    // not "late" in the sense this heuristic means), and check-related
+    // moves in either direction (tactical, and exactly what a shallower
+    // search is most likely to misjudge).
+    const LMR_MIN_DEPTH: i32 = 3;
+    const LMR_MOVE_THRESHOLD: usize = 3;
+    const LMR_REDUCTION: i32 = 1;
+
     let mut best = -(MATE_VALUE + 1);
     let mut best_move = moves[0];
-    let mut is_first_move = true;
-    for mv in moves {
+    for (move_index, mv) in moves.into_iter().enumerate() {
         let mut next = game.clone();
         if next.make_move(mv).is_err() {
             // `legal_moves_for_turn` is a pure board check and doesn't know
@@ -615,17 +637,35 @@ fn negamax(
             // crash the whole app.
             continue;
         }
-        let score = if is_first_move {
+        let score = if move_index == 0 {
             -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt, killers)
         } else {
-            let scout = -negamax(&next, depth - 1, ply + 1, -alpha - 1, -alpha, tt, killers);
+            let is_quiet = game.board().get(mv.to).is_none();
+            let reduction = if depth >= LMR_MIN_DEPTH
+                && move_index >= LMR_MOVE_THRESHOLD
+                && is_quiet
+                && !rules::is_in_check(game.board(), game.turn())
+                && !rules::is_in_check(next.board(), next.turn())
+            {
+                LMR_REDUCTION
+            } else {
+                0
+            };
+            let mut scout = -negamax(&next, depth - 1 - reduction, ply + 1, -alpha - 1, -alpha, tt, killers);
+            if reduction > 0 && scout > alpha {
+                // The reduced look suggested this move might actually beat
+                // everything seen so far — not trustworthy at a shallower
+                // depth than its siblings got, so confirm at full depth
+                // (still a cheap null-window check) before it's allowed to
+                // trigger the full-width re-search below.
+                scout = -negamax(&next, depth - 1, ply + 1, -alpha - 1, -alpha, tt, killers);
+            }
             if scout > alpha && scout < beta {
                 -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt, killers)
             } else {
                 scout
             }
         };
-        is_first_move = false;
         if score > best {
             best = score;
             best_move = mv;
