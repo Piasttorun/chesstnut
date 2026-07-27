@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::engine::board::{Color, PieceKind, Square};
-use crate::engine::game::Game;
+use crate::engine::game::{Game, Position};
 use crate::engine::moves::Move;
 use crate::engine::rules;
 
@@ -58,13 +58,13 @@ const TABLE_SIZE: usize = 1 << 20;
 /// actual moves) would need real invalidation logic and is a next-step
 /// improvement, not this one.
 ///
-/// Guarded by a single `Mutex` rather than a lock-free scheme: `best_root_score`
-/// caps itself at a handful of threads, and every node already pays for a
-/// fresh legal-move generation pass (this engine clones the board and
-/// regenerates moves rather than doing make/unmake — see `Game`'s own doc
-/// comment on why) — lock contention on a Vec index is not the bottleneck
-/// here, and a lock-free table is real engineering complexity this project
-/// doesn't need yet.
+/// Guarded by a single `Mutex` rather than a lock-free scheme:
+/// `best_root_score` caps itself at a handful of threads, and every node
+/// already pays for a fresh legal-move generation pass regardless (see
+/// `Position`, which this engine searches through instead of `Game`
+/// specifically so that regeneration is cheap) — lock contention on a Vec
+/// index is not the bottleneck here, and a lock-free table is real
+/// engineering complexity this project doesn't need yet.
 pub(crate) struct TranspositionTable {
     entries: Mutex<Vec<Option<TtEntry>>>,
 }
@@ -308,11 +308,12 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
         return (Score::Centipawns(0), None);
     }
 
+    let position = game.to_position();
     let depth = depth.max(1) as i32;
-    let mut moves = order_moves(game, game.legal_moves_for_turn(), None, [None, None]);
+    let mut moves = order_moves(&position, position.legal_moves_for_turn(), None, [None, None]);
 
     let (raw, best_move) = if moves.is_empty() {
-        let raw = if rules::is_in_check(game.board(), game.turn()) {
+        let raw = if rules::is_in_check(position.board(), position.turn()) {
             -MATE_VALUE
         } else {
             0
@@ -350,7 +351,7 @@ fn think(game: &Game, depth: u32, cancel: &Cancellation) -> (Score, Option<Move>
             // cut off than the wide-open window the very first depth has
             // no choice but to use.
             let (score, mv) = search_root_with_aspiration(
-                game,
+                &position,
                 &moves,
                 current_depth,
                 cancel,
@@ -412,7 +413,7 @@ const ASPIRATION_WINDOW: i32 = 50;
 /// `use_aspiration` is `false` for the very first depth, which has no
 /// previous score to aim at.
 fn search_root_with_aspiration(
-    game: &Game,
+    position: &Position,
     moves: &[Move],
     depth: i32,
     cancel: &Cancellation,
@@ -424,13 +425,13 @@ fn search_root_with_aspiration(
     if use_aspiration {
         let alpha = previous_score.saturating_sub(ASPIRATION_WINDOW);
         let beta = previous_score.saturating_add(ASPIRATION_WINDOW);
-        let (score, mv) = best_root_score(game, moves, depth, cancel, tt, killers, alpha, beta);
+        let (score, mv) = best_root_score(position, moves, depth, cancel, tt, killers, alpha, beta);
         if cancel.is_cancelled() || (score > alpha && score < beta) {
             return (score, mv);
         }
         // Fail low or fail high — fall through to the full-width re-search below.
     }
-    best_root_score(game, moves, depth, cancel, tt, killers, -(MATE_VALUE + 1), MATE_VALUE + 1)
+    best_root_score(position, moves, depth, cancel, tt, killers, -(MATE_VALUE + 1), MATE_VALUE + 1)
 }
 
 /// Searches every root move in parallel, one thread per available CPU core
@@ -448,7 +449,7 @@ fn search_root_with_aspiration(
 /// `beta` come from the caller (see `search_root_with_aspiration`) rather
 /// than always being the widest possible window.
 fn best_root_score(
-    game: &Game,
+    position: &Position,
     moves: &[Move],
     depth: i32,
     cancel: &Cancellation,
@@ -498,8 +499,8 @@ fn best_root_score(
                             if cancel.is_cancelled() {
                                 return None;
                             }
-                            let mut next = game.clone();
-                            next.make_move(mv).ok()?;
+                            let mut next = *position;
+                            next.make_move(mv);
                             let score = -negamax(&next, depth - 1, 1, -beta, -alpha, tt, killers);
                             Some((score, mv))
                         })
@@ -521,7 +522,7 @@ fn best_root_score(
 /// Returns a score from the perspective of whoever is to move in `game` —
 /// positive is good for the mover, regardless of color.
 fn negamax(
-    game: &Game,
+    position: &Position,
     depth: i32,
     ply: i32,
     mut alpha: i32,
@@ -529,17 +530,17 @@ fn negamax(
     tt: &TranspositionTable,
     killers: &KillerMoves,
 ) -> i32 {
-    let hash = game.zobrist_hash();
+    let hash = position.zobrist_hash();
     let original_alpha = alpha;
     let (tt_score, tt_move) = tt.probe(hash, depth, alpha, beta);
     if let Some(score) = tt_score {
         return score;
     }
 
-    let moves = order_moves(game, game.legal_moves_for_turn(), tt_move, killers.get(ply));
+    let moves = order_moves(position, position.legal_moves_for_turn(), tt_move, killers.get(ply));
 
     if moves.is_empty() {
-        return if rules::is_in_check(game.board(), game.turn()) {
+        return if rules::is_in_check(position.board(), position.turn()) {
             // The mover is checkmated — as bad as it gets, but a mate found
             // deeper in the tree (larger `ply`) is less bad than an
             // immediate one, so the search picks the longest defense when
@@ -551,7 +552,7 @@ fn negamax(
     }
 
     if depth == 0 {
-        return quiescence(game, alpha, beta);
+        return quiescence(position, alpha, beta);
     }
 
     // Null-move pruning: ask "if the side to move got to pass — handing the
@@ -573,12 +574,12 @@ fn negamax(
     // is fine too").
     const NULL_MOVE_REDUCTION: i32 = 2;
     if depth > NULL_MOVE_REDUCTION
-        && !rules::is_in_check(game.board(), game.turn())
-        && has_non_pawn_material(game, game.turn())
+        && !rules::is_in_check(position.board(), position.turn())
+        && has_non_pawn_material(position, position.turn())
     {
-        let null_game = game.null_move();
+        let null_position = position.null_move();
         let score = -negamax(
-            &null_game,
+            &null_position,
             depth - 1 - NULL_MOVE_REDUCTION,
             ply + 1,
             -beta,
@@ -626,25 +627,21 @@ fn negamax(
     let mut best = -(MATE_VALUE + 1);
     let mut best_move = moves[0];
     for (move_index, mv) in moves.into_iter().enumerate() {
-        let mut next = game.clone();
-        if next.make_move(mv).is_err() {
-            // `legal_moves_for_turn` is a pure board check and doesn't know
-            // about `make_move`'s other guards (clock choice pending, or —
-            // for a live timed game — real wall-clock time running out
-            // while a slow deep search is still thinking). Both are rare
-            // and effectively mean "this position isn't playable anymore,"
-            // so skip the move rather than let a stale `Ok` assumption
-            // crash the whole app.
-            continue;
-        }
+        // Infallible: `mv` came from this exact position's own
+        // `legal_moves_for_turn` a few lines up, and `Position::make_move`
+        // (unlike `Game::make_move`) has no *other* reason to reject a
+        // move — no clock, no PGN/SAN bookkeeping, nothing external that
+        // could make an already-legal move stop being legal.
+        let mut next = *position;
+        next.make_move(mv);
         let score = if move_index == 0 {
             -negamax(&next, depth - 1, ply + 1, -beta, -alpha, tt, killers)
         } else {
-            let is_quiet = game.board().get(mv.to).is_none();
+            let is_quiet = position.board().get(mv.to).is_none();
             let reduction = if depth >= LMR_MIN_DEPTH
                 && move_index >= LMR_MOVE_THRESHOLD
                 && is_quiet
-                && !rules::is_in_check(game.board(), game.turn())
+                && !rules::is_in_check(position.board(), position.turn())
                 && !rules::is_in_check(next.board(), next.turn())
             {
                 LMR_REDUCTION
@@ -681,7 +678,7 @@ fn negamax(
             // since `order_moves` already puts them first on their own
             // merits; recording one here would just waste a killer slot
             // on a move that didn't need the help.
-            if game.board().get(mv.to).is_none() {
+            if position.board().get(mv.to).is_none() {
                 killers.record(ply, mv);
             }
             break; // alpha-beta cutoff — the opponent already has a better option elsewhere
@@ -723,8 +720,8 @@ fn negamax(
 /// depth cap is needed. Not extended to check evasions when the mover is in
 /// check at a leaf; that's a known, deliberate simplification for this
 /// first pass, not an oversight.
-fn quiescence(game: &Game, mut alpha: i32, beta: i32) -> i32 {
-    let stand_pat = mover_relative_eval(game);
+fn quiescence(position: &Position, mut alpha: i32, beta: i32) -> i32 {
+    let stand_pat = mover_relative_eval(position);
     if stand_pat >= beta {
         return beta;
     }
@@ -732,15 +729,13 @@ fn quiescence(game: &Game, mut alpha: i32, beta: i32) -> i32 {
         alpha = stand_pat;
     }
 
-    let captures = order_moves(game, game.legal_moves_for_turn(), None, [None, None])
+    let captures = order_moves(position, position.legal_moves_for_turn(), None, [None, None])
         .into_iter()
-        .filter(|mv| game.board().get(mv.to).is_some());
+        .filter(|mv| position.board().get(mv.to).is_some());
 
     for mv in captures {
-        let mut next = game.clone();
-        if next.make_move(mv).is_err() {
-            continue;
-        }
+        let mut next = *position;
+        next.make_move(mv);
         let score = -quiescence(&next, -beta, -alpha);
         if score >= beta {
             return beta;
@@ -762,10 +757,15 @@ fn quiescence(game: &Game, mut alpha: i32, beta: i32) -> i32 {
 /// would have anyway for a given depth — but trying the most promising
 /// move first means the cutoffs in `negamax` trigger much earlier, so a
 /// large chunk of the tree never gets visited at all.
-fn order_moves(game: &Game, mut moves: Vec<Move>, preferred: Option<Move>, killers: [Option<Move>; 2]) -> Vec<Move> {
+fn order_moves(
+    position: &Position,
+    mut moves: Vec<Move>,
+    preferred: Option<Move>,
+    killers: [Option<Move>; 2],
+) -> Vec<Move> {
     moves.sort_by_key(|mv| {
         let is_preferred = preferred == Some(*mv);
-        let captured_value = game.board().get(mv.to).map(|p| piece_value(p.kind)).unwrap_or(0);
+        let captured_value = position.board().get(mv.to).map(|p| piece_value(p.kind)).unwrap_or(0);
         let is_killer = captured_value == 0 && killers.contains(&Some(*mv));
         (
             std::cmp::Reverse(is_preferred),
@@ -778,10 +778,10 @@ fn order_moves(game: &Game, mut moves: Vec<Move>, preferred: Option<Move>, kille
 
 /// Whether `color` has any piece besides its king and pawns — see the
 /// zugzwang guard on null-move pruning in `negamax`.
-fn has_non_pawn_material(game: &Game, color: Color) -> bool {
+fn has_non_pawn_material(position: &Position, color: Color) -> bool {
     for index in 0..64 {
         let square = Square::from_index(index);
-        if let Some(piece) = game.board().get(square) {
+        if let Some(piece) = position.board().get(square) {
             if piece.color == color && piece.kind != PieceKind::Pawn && piece.kind != PieceKind::King {
                 return true;
             }
@@ -790,11 +790,11 @@ fn has_non_pawn_material(game: &Game, color: Color) -> bool {
     false
 }
 
-fn mover_relative_eval(game: &Game) -> i32 {
-    let Score::Centipawns(white_score) = evaluate(game.board()) else {
+fn mover_relative_eval(position: &Position) -> i32 {
+    let Score::Centipawns(white_score) = evaluate(position.board()) else {
         unreachable!("evaluate() only ever produces Centipawns for now")
     };
-    match game.turn() {
+    match position.turn() {
         Color::White => white_score,
         Color::Black => -white_score,
     }

@@ -80,7 +80,7 @@ function renderSettingsPanel() {
 // only opponent === "computer" is new behavior; opponent === "human" (the
 // default) reproduces the original two-humans-at-one-board experience
 // exactly, since every AI-related check below short-circuits on it.
-let gameMode = { opponent: "human", humanColor: "white", computerDepth: 3 };
+let gameMode = { opponent: "human", humanColor: "white", computerDepth: 8 };
 
 function renderSetupPickers() {
   document.querySelectorAll("#opponent-choice .settings-choice-option").forEach((button) => {
@@ -1053,15 +1053,17 @@ function maybeTriggerAiMove(view) {
   setTimeout(() => requestAiMove(view.fen), 0);
 }
 
-// A transposition table (see engine/src/ai/search.rs) since made depth 6
-// meaningfully faster in most positions, but a busy middlegame can still
-// legitimately take ~30s at that depth — comfortably under this, but well
-// past what the old 20s limit allowed for. Exists so a request that never
-// comes back for any *other* reason (a genuine backend bug, an IPC
-// hiccup, ...) can't leave the game waiting on a move forever: it's not
-// the human's turn while the computer is "thinking," so with nothing to
-// click and no move ever arriving, that's a hard lock — worth guarding
-// against defensively even without a confirmed root cause.
+// Search-side improvements since this was first set (transposition table,
+// killer moves, aspiration windows, PVS, late move reductions, and
+// dropping per-node Game cloning in favor of a lightweight Position type
+// — see engine/src/ai/search.rs) made even depth 8 land well under this in
+// every position measured so far, but this stays generous rather than
+// tight: it exists so a request that never comes back for any *other*
+// reason (a genuine backend bug, an IPC hiccup, ...) can't leave the game
+// waiting on a move forever, not to shave the common case as close as
+// possible. It's not the human's turn while the computer is "thinking,"
+// so with nothing to click and no move ever arriving, that's a hard lock
+// — worth guarding against defensively even without a confirmed root cause.
 const AI_MOVE_TIMEOUT_MS = 60_000;
 
 function withTimeout(promise, ms) {
@@ -1073,10 +1075,10 @@ function withTimeout(promise, ms) {
 
 // Set the instant a request actually starts, cleared the instant it
 // settles (either way) — statusText reads this to show a live "Computer is
-// thinking… (Ns)" count instead of a bare, unchanging message. A slow
-// depth-6 search taking 30s now looks exactly like a stuck one unless
-// there's some visible sign it's still working; a ticking counter is that
-// sign, cheap as it is.
+// thinking… (Ns)" count instead of a bare, unchanging message. Even an
+// unusually slow search taking several seconds looks exactly like a stuck
+// one unless there's some visible sign it's still working; a ticking
+// counter is that sign, cheap as it is.
 let aiThinkingStartedAt = null;
 let aiThinkingTickHandle = null;
 
